@@ -150,23 +150,73 @@ router.post('/products', async (req, res) => {
 router.patch('/products/:id', async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const { name, name_ar, external_sku, retail_price, min_stock, active } = req.body || {};
+    const {
+      sku,
+      external_sku,
+      name,
+      name_ar,
+      oil_type,
+      container_type,
+      size_ml,
+      oil_material_id,
+      oil_litres_per_unit,
+      container_material_id,
+      containers_per_unit,
+      sticker_material_id,
+      stickers_per_unit,
+      extra_material_id,
+      extra_qty_per_unit,
+      retail_price,
+      min_stock,
+      stock_qty,
+      unit_cogs,
+      active,
+    } = req.body || {};
+
     const result = await query(
       `UPDATE finished_products
-       SET name = COALESCE($1, name),
-           name_ar = COALESCE($2, name_ar),
-           external_sku = COALESCE($3, external_sku),
-           retail_price = COALESCE($4, retail_price),
-           min_stock = COALESCE($5, min_stock),
-           active = COALESCE($6, active),
+       SET sku = COALESCE($1, sku),
+           external_sku = COALESCE($2, external_sku),
+           name = COALESCE($3, name),
+           name_ar = COALESCE($4, name_ar),
+           oil_type = COALESCE($5, oil_type),
+           container_type = COALESCE($6, container_type),
+           size_ml = COALESCE($7, size_ml),
+           oil_material_id = $8,
+           oil_litres_per_unit = COALESCE($9, oil_litres_per_unit),
+           container_material_id = $10,
+           containers_per_unit = COALESCE($11, containers_per_unit),
+           sticker_material_id = $12,
+           stickers_per_unit = COALESCE($13, stickers_per_unit),
+           extra_material_id = $14,
+           extra_qty_per_unit = COALESCE($15, extra_qty_per_unit),
+           retail_price = COALESCE($16, retail_price),
+           min_stock = COALESCE($17, min_stock),
+           stock_qty = COALESCE($18, stock_qty),
+           unit_cogs = COALESCE($19, unit_cogs),
+           active = COALESCE($20, active),
            updated_at = NOW()
-       WHERE id = $7 RETURNING *`,
+       WHERE id = $21 RETURNING *`,
       [
-        name || null,
-        name_ar || null,
-        external_sku ?? null,
-        retail_price !== undefined ? Number(retail_price) : null,
-        min_stock !== undefined ? Number(min_stock) : null,
+        sku?.trim() ? sku.trim().toUpperCase() : null,
+        external_sku !== undefined ? String(external_sku).trim() : null,
+        name?.trim() || null,
+        name_ar?.trim() || null,
+        oil_type || null,
+        container_type || null,
+        size_ml !== undefined && size_ml !== '' ? Number(size_ml) : null,
+        oil_material_id !== undefined ? (oil_material_id ? Number(oil_material_id) : null) : null,
+        oil_litres_per_unit !== undefined && oil_litres_per_unit !== '' ? Number(oil_litres_per_unit) : null,
+        container_material_id !== undefined ? (container_material_id ? Number(container_material_id) : null) : null,
+        containers_per_unit !== undefined && containers_per_unit !== '' ? Number(containers_per_unit) : null,
+        sticker_material_id !== undefined ? (sticker_material_id ? Number(sticker_material_id) : null) : null,
+        stickers_per_unit !== undefined && stickers_per_unit !== '' ? Number(stickers_per_unit) : null,
+        extra_material_id !== undefined ? (extra_material_id ? Number(extra_material_id) : null) : null,
+        extra_qty_per_unit !== undefined && extra_qty_per_unit !== '' ? Number(extra_qty_per_unit) : null,
+        retail_price !== undefined && retail_price !== '' ? Number(retail_price) : null,
+        min_stock !== undefined && min_stock !== '' ? Number(min_stock) : null,
+        stock_qty !== undefined && stock_qty !== '' ? Math.floor(Number(stock_qty)) : null,
+        unit_cogs !== undefined && unit_cogs !== '' ? Number(unit_cogs) : null,
         active !== undefined ? Boolean(active) : null,
         id,
       ]
@@ -174,6 +224,7 @@ router.patch('/products/:id', async (req, res) => {
     if (result.rows.length === 0) return res.status(404).json({ error: 'Product not found' });
     res.json({ product: result.rows[0] });
   } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'A finished product with this SKU already exists' });
     console.error('Update product error:', err);
     res.status(500).json({ error: 'Failed to update finished product' });
   }
@@ -342,6 +393,167 @@ router.post('/batches', async (req, res) => {
     if (err.status) return res.status(err.status).json({ error: err.message });
     console.error('Create bottling batch error:', err);
     res.status(500).json({ error: 'Failed to record bottling batch' });
+  }
+});
+
+router.patch('/batches/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const {
+      batch_date,
+      quantity_produced,
+      spillage_litres = 0,
+      batch_hidden_cost = 0,
+      harvest_note = '',
+      notes = '',
+    } = req.body || {};
+
+    const qty = Math.floor(Number(quantity_produced));
+    const spillage = Number(spillage_litres) || 0;
+    const hiddenCost = Number(batch_hidden_cost) || 0;
+
+    if (!(qty > 0) || spillage < 0 || hiddenCost < 0) {
+      return res.status(400).json({ error: 'Positive quantity and non-negative spillage/hidden cost are required' });
+    }
+
+    const updated = await withTransaction(async (tx) => {
+      const oldRes = await tx.query('SELECT * FROM bottling_batches WHERE id = $1', [id]);
+      if (oldRes.rows.length === 0) {
+        const e = new Error('Bottling batch not found');
+        e.status = 404;
+        throw e;
+      }
+      const old = oldRes.rows[0];
+      const fp = (await tx.query('SELECT * FROM finished_products WHERE id = $1', [old.finished_product_id])).rows[0];
+
+      const dQty = qty - Number(old.quantity_produced);
+      if (Number(fp.stock_qty) + dQty < 0) {
+        const e = new Error(`Cannot reduce batch quantity below already-sold stock (available: ${fp.stock_qty})`);
+        e.status = 400;
+        throw e;
+      }
+
+      const oilBase = Number((qty * Number(fp.oil_litres_per_unit || 0)).toFixed(3));
+      const oilTotal = Number((oilBase + spillage).toFixed(3));
+      const cntNeeded = Number((qty * Number(fp.containers_per_unit || 0)).toFixed(3));
+      const stkNeeded = Number((qty * Number(fp.stickers_per_unit || 0)).toFixed(3));
+      const extNeeded = Number((qty * Number(fp.extra_qty_per_unit || 0)).toFixed(3));
+
+      const dOil = Number((oilTotal - (Number(old.oil_litres_used) + Number(old.spillage_litres))).toFixed(3));
+      const dCnt = Number((cntNeeded - Number(old.containers_used)).toFixed(3));
+      const dStk = Number((stkNeeded - Number(old.stickers_used)).toFixed(3));
+      const dExt = Number((extNeeded - Number(old.extra_used)).toFixed(3));
+
+      async function adjustMat(materialId, delta, newTotal, label) {
+        if (!materialId) return 0;
+        const m = (await tx.query('SELECT * FROM raw_materials WHERE id = $1', [materialId])).rows[0];
+        if (!m) return 0;
+        if (delta > 0 && Number(m.stock_qty) + 0.0001 < delta) {
+          const e = new Error(`Insufficient ${label} (${m.name}): need ${delta} more ${m.base_unit}`);
+          e.status = 400;
+          throw e;
+        }
+        if (delta !== 0) {
+          const nextStock = Number(Math.max(0, Number(m.stock_qty) - delta).toFixed(3));
+          await tx.query('UPDATE raw_materials SET stock_qty = $1, updated_at = NOW() WHERE id = $2', [nextStock, m.id]);
+          await tx.query(
+            `INSERT INTO stock_movements (item_type, item_id, movement_type, qty_delta, unit_cost, reference_no, notes)
+             VALUES ('raw', $1, 'adjustment', $2, $3, $4, 'Bottling batch edited')`,
+            [m.id, -delta, Number(m.avg_unit_cost), old.batch_code]
+          );
+        }
+        return Number((newTotal * Number(m.avg_unit_cost || 0)).toFixed(2));
+      }
+
+      const oilCost = await adjustMat(fp.oil_material_id, dOil, oilTotal, 'Bulk Olive Oil');
+      const cntCost = await adjustMat(fp.container_material_id, dCnt, cntNeeded, 'Containers');
+      const stkCost = await adjustMat(fp.sticker_material_id, dStk, stkNeeded, 'Stickers');
+      const extCost = await adjustMat(fp.extra_material_id, dExt, extNeeded, 'Extra Packaging');
+
+      const totalBatchCost = Number((oilCost + cntCost + stkCost + extCost + hiddenCost).toFixed(2));
+      const unitCogs = Number((totalBatchCost / qty).toFixed(4));
+
+      const bRes = await tx.query(
+        `UPDATE bottling_batches
+         SET batch_date = COALESCE($1::date, batch_date),
+             quantity_produced = $2,
+             oil_litres_used = $3,
+             spillage_litres = $4,
+             containers_used = $5,
+             stickers_used = $6,
+             extra_used = $7,
+             oil_cost = $8,
+             container_cost = $9,
+             sticker_cost = $10,
+             extra_cost = $11,
+             batch_hidden_cost = $12,
+             total_batch_cost = $13,
+             unit_cogs = $14,
+             harvest_note = $15,
+             notes = $16
+         WHERE id = $17 RETURNING *`,
+        [
+          batch_date || null,
+          qty,
+          oilBase,
+          spillage,
+          cntNeeded,
+          stkNeeded,
+          extNeeded,
+          oilCost,
+          cntCost,
+          stkCost,
+          extCost,
+          hiddenCost,
+          totalBatchCost,
+          unitCogs,
+          harvest_note,
+          notes,
+          id,
+        ]
+      );
+
+      const nextFpStock = Math.max(0, Number(fp.stock_qty) + dQty);
+      const nextFpVal = Math.max(0, Number(fp.stock_qty) * Number(fp.unit_cogs) - Number(old.total_batch_cost) + totalBatchCost);
+      const nextFpCogs = nextFpStock > 0 ? Number((nextFpVal / nextFpStock).toFixed(4)) : unitCogs;
+      await tx.query('UPDATE finished_products SET stock_qty = $1, unit_cogs = $2, updated_at = NOW() WHERE id = $3', [
+        nextFpStock,
+        nextFpCogs,
+        fp.id,
+      ]);
+
+      if (dQty !== 0) {
+        await tx.query(
+          `INSERT INTO stock_movements (item_type, item_id, movement_type, qty_delta, unit_cost, reference_no, notes)
+           VALUES ('finished', $1, 'adjustment', $2, $3, $4, 'Bottling batch edited')`,
+          [fp.id, dQty, unitCogs, old.batch_code]
+        );
+      }
+
+      await tx.query("DELETE FROM hidden_costs WHERE allocation_scope = 'production' AND related_ref = $1", [old.batch_code]);
+      if (hiddenCost > 0) {
+        await tx.query(
+          `INSERT INTO hidden_costs (cost_date, category, title, title_ar, amount, allocation_scope, related_ref, notes)
+           VALUES (COALESCE($1::date, CURRENT_DATE), 'packaging_misc', $2, $3, $4, 'production', $5, $6)`,
+          [
+            batch_date || old.batch_date,
+            `Bottling batch cost (${fp.sku})`,
+            `تكلفة تعبئة وتغليف (${fp.name_ar || fp.name})`,
+            hiddenCost,
+            old.batch_code,
+            notes || 'Absorbed into finished product unit COGS',
+          ]
+        );
+      }
+
+      return bRes.rows[0];
+    });
+
+    res.json({ batch: updated });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    console.error('Update bottling batch error:', err);
+    res.status(500).json({ error: 'Failed to update bottling batch' });
   }
 });
 

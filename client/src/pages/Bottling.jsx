@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Calculator, Factory, FlaskConical, PackagePlus, Plus } from 'lucide-react';
+import { Calculator, Edit3, Factory, FlaskConical, PackagePlus, Plus } from 'lucide-react';
 import { apiFetch } from '../api.js';
 import { formatEGP, formatNum, pickName, t } from '../i18n.js';
 import Modal from '../components/Modal.jsx';
@@ -13,7 +13,9 @@ export default function Bottling({ lang }) {
   const [error, setError] = useState('');
 
   const [showBatchModal, setShowBatchModal] = useState(false);
+  const [editingBatch, setEditingBatch] = useState(null);
   const [showSkuModal, setShowSkuModal] = useState(false);
+  const [editingSkuId, setEditingSkuId] = useState(null);
   const [saving, setSaving] = useState(false);
 
   const [bForm, setBForm] = useState({
@@ -44,6 +46,8 @@ export default function Bottling({ lang }) {
     extra_qty_per_unit: '1',
     retail_price: '390',
     min_stock: '10',
+    stock_qty: '',
+    unit_cogs: '',
   });
 
   async function loadAll() {
@@ -71,6 +75,7 @@ export default function Bottling({ lang }) {
 
   function openBatchFor(sku = null) {
     const chosen = sku || products[0];
+    setEditingBatch(null);
     setBForm({
       batch_date: new Date().toISOString().slice(0, 10),
       finished_product_id: chosen ? String(chosen.id) : '',
@@ -83,11 +88,26 @@ export default function Bottling({ lang }) {
     setShowBatchModal(true);
   }
 
+  function openEditBatch(batch) {
+    setEditingBatch(batch);
+    setBForm({
+      batch_date: String(batch.batch_date).slice(0, 10),
+      finished_product_id: String(batch.finished_product_id),
+      quantity_produced: String(batch.quantity_produced),
+      spillage_litres: String(batch.spillage_litres ?? 0),
+      batch_hidden_cost: String(batch.batch_hidden_cost ?? 0),
+      harvest_note: batch.harvest_note || '',
+      notes: batch.notes || '',
+    });
+    setShowBatchModal(true);
+  }
+
   function openNewSkuModal() {
     const oil = materials.find((m) => m.category === 'oil');
     const cont = materials.find((m) => m.category === 'container');
     const stk = materials.find((m) => m.category === 'sticker');
     const pkg = materials.find((m) => m.category === 'packaging');
+    setEditingSkuId(null);
     setSkuForm({
       sku: '',
       external_sku: '',
@@ -106,6 +126,34 @@ export default function Bottling({ lang }) {
       extra_qty_per_unit: pkg ? '1' : '0',
       retail_price: '400',
       min_stock: '10',
+      stock_qty: '',
+      unit_cogs: '',
+    });
+    setShowSkuModal(true);
+  }
+
+  function openEditSkuModal(prod) {
+    setEditingSkuId(prod.id);
+    setSkuForm({
+      sku: prod.sku || '',
+      external_sku: prod.external_sku || '',
+      name: prod.name || '',
+      name_ar: prod.name_ar || '',
+      oil_type: prod.oil_type || 'extra_virgin',
+      container_type: prod.container_type || 'glass',
+      size_ml: String(prod.size_ml || 500),
+      oil_material_id: prod.oil_material_id ? String(prod.oil_material_id) : '',
+      oil_litres_per_unit: String(prod.oil_litres_per_unit ?? 0.5),
+      container_material_id: prod.container_material_id ? String(prod.container_material_id) : '',
+      containers_per_unit: String(prod.containers_per_unit ?? 1),
+      sticker_material_id: prod.sticker_material_id ? String(prod.sticker_material_id) : '',
+      stickers_per_unit: String(prod.stickers_per_unit ?? 1),
+      extra_material_id: prod.extra_material_id ? String(prod.extra_material_id) : '',
+      extra_qty_per_unit: String(prod.extra_qty_per_unit ?? 0),
+      retail_price: String(prod.retail_price ?? 0),
+      min_stock: String(prod.min_stock ?? 10),
+      stock_qty: String(prod.stock_qty ?? 0),
+      unit_cogs: String(prod.unit_cogs ?? 0),
     });
     setShowSkuModal(true);
   }
@@ -120,6 +168,21 @@ export default function Bottling({ lang }) {
   const reqStk = selectedSku ? qty * Number(selectedSku.stickers_per_unit || 0) : 0;
   const reqExt = selectedSku ? qty * Number(selectedSku.extra_qty_per_unit || 0) : 0;
 
+  // When editing an existing batch, add back what that batch already consumed to check true available stock
+  const availOil = selectedSku
+    ? Number(selectedSku.oil_stock_qty || 0) +
+      (editingBatch ? Number(editingBatch.oil_litres_used || 0) + Number(editingBatch.spillage_litres || 0) : 0)
+    : 0;
+  const availCont = selectedSku
+    ? Number(selectedSku.container_stock_qty || 0) + (editingBatch ? Number(editingBatch.containers_used || 0) : 0)
+    : 0;
+  const availStk = selectedSku
+    ? Number(selectedSku.sticker_stock_qty || 0) + (editingBatch ? Number(editingBatch.stickers_used || 0) : 0)
+    : 0;
+  const availExt = selectedSku
+    ? Number(selectedSku.extra_stock_qty || 0) + (editingBatch ? Number(editingBatch.extra_used || 0) : 0)
+    : 0;
+
   const estTotalBatch = selectedSku
     ? reqOil * Number(selectedSku.oil_unit_cost || 0) +
       reqCont * Number(selectedSku.container_unit_cost || 0) +
@@ -130,10 +193,10 @@ export default function Bottling({ lang }) {
   const estUnitCogs = qty > 0 ? estTotalBatch / qty : 0;
   const estProfit = selectedSku ? Number(selectedSku.retail_price || 0) - estUnitCogs : 0;
 
-  const oilShort = selectedSku && reqOil > Number(selectedSku.oil_stock_qty || 0) + 0.001;
-  const contShort = selectedSku && reqCont > Number(selectedSku.container_stock_qty || 0) + 0.001;
-  const stkShort = selectedSku && reqStk > Number(selectedSku.sticker_stock_qty || 0) + 0.001;
-  const extShort = selectedSku && selectedSku.extra_material_id && reqExt > Number(selectedSku.extra_stock_qty || 0) + 0.001;
+  const oilShort = selectedSku && reqOil > availOil + 0.001;
+  const contShort = selectedSku && reqCont > availCont + 0.001;
+  const stkShort = selectedSku && reqStk > availStk + 0.001;
+  const extShort = selectedSku && selectedSku.extra_material_id && reqExt > availExt + 0.001;
   const anyShortage = oilShort || contShort || stkShort || extShort;
 
   async function submitBatch(e) {
@@ -141,16 +204,24 @@ export default function Bottling({ lang }) {
     setSaving(true);
     setError('');
     try {
-      await apiFetch('/api/bottling/batches', {
-        method: 'POST',
-        body: {
-          ...bForm,
-          finished_product_id: Number(bForm.finished_product_id),
-          quantity_produced: qty,
-          spillage_litres: spill,
-          batch_hidden_cost: bHidden,
-        },
-      });
+      const payload = {
+        ...bForm,
+        finished_product_id: Number(bForm.finished_product_id),
+        quantity_produced: qty,
+        spillage_litres: spill,
+        batch_hidden_cost: bHidden,
+      };
+      if (editingBatch) {
+        await apiFetch(`/api/bottling/batches/${editingBatch.id}`, {
+          method: 'PATCH',
+          body: payload,
+        });
+      } else {
+        await apiFetch('/api/bottling/batches', {
+          method: 'POST',
+          body: payload,
+        });
+      }
       setShowBatchModal(false);
       await loadAll();
     } catch (err) {
@@ -165,19 +236,33 @@ export default function Bottling({ lang }) {
     setSaving(true);
     setError('');
     try {
-      await apiFetch('/api/bottling/products', {
-        method: 'POST',
-        body: {
-          ...skuForm,
-          size_ml: Number(skuForm.size_ml),
-          oil_litres_per_unit: Number(skuForm.oil_litres_per_unit),
-          containers_per_unit: Number(skuForm.containers_per_unit),
-          stickers_per_unit: Number(skuForm.stickers_per_unit),
-          extra_qty_per_unit: Number(skuForm.extra_qty_per_unit || 0),
-          retail_price: Number(skuForm.retail_price),
-          min_stock: Number(skuForm.min_stock),
-        },
-      });
+      const payload = {
+        ...skuForm,
+        size_ml: Number(skuForm.size_ml),
+        oil_litres_per_unit: Number(skuForm.oil_litres_per_unit),
+        containers_per_unit: Number(skuForm.containers_per_unit),
+        stickers_per_unit: Number(skuForm.stickers_per_unit),
+        extra_qty_per_unit: Number(skuForm.extra_qty_per_unit || 0),
+        retail_price: Number(skuForm.retail_price),
+        min_stock: Number(skuForm.min_stock),
+        ...(editingSkuId
+          ? {
+              stock_qty: skuForm.stock_qty !== '' ? Math.floor(Number(skuForm.stock_qty)) : undefined,
+              unit_cogs: skuForm.unit_cogs !== '' ? Number(skuForm.unit_cogs) : undefined,
+            }
+          : {}),
+      };
+      if (editingSkuId) {
+        await apiFetch(`/api/bottling/products/${editingSkuId}`, {
+          method: 'PATCH',
+          body: payload,
+        });
+      } else {
+        await apiFetch('/api/bottling/products', {
+          method: 'POST',
+          body: payload,
+        });
+      }
       setShowSkuModal(false);
       await loadAll();
     } catch (err) {
@@ -281,14 +366,24 @@ export default function Bottling({ lang }) {
                           )}
                         </td>
                         <td>
-                          <button
-                            type="button"
-                            className="btn btn-primary btn-sm"
-                            onClick={() => openBatchFor(p)}
-                          >
-                            <FlaskConical size={14} />
-                            {t(lang, 'bottleNow')}
-                          </button>
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <button
+                              type="button"
+                              className="btn btn-primary btn-sm"
+                              onClick={() => openBatchFor(p)}
+                            >
+                              <FlaskConical size={14} />
+                              {t(lang, 'bottleNow')}
+                            </button>
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              onClick={() => openEditSkuModal(p)}
+                              aria-label={t(lang, 'edit')}
+                            >
+                              <Edit3 size={13} />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -315,6 +410,7 @@ export default function Bottling({ lang }) {
                   <th>{t(lang, 'hiddenShare')}</th>
                   <th>{t(lang, 'totalBatchCost')}</th>
                   <th>{t(lang, 'unitCogs')}</th>
+                  <th>{t(lang, 'actions')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -339,6 +435,16 @@ export default function Bottling({ lang }) {
                     <td className="num">
                       <span className="badge badge-olive">{formatEGP(b.unit_cogs, lang)}</span>
                     </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => openEditBatch(b)}
+                        aria-label={t(lang, 'edit')}
+                      >
+                        <Edit3 size={13} />
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -347,10 +453,10 @@ export default function Bottling({ lang }) {
         </div>
       )}
 
-      {/* MODAL: NEW BOTTLING RUN */}
+      {/* MODAL: NEW / EDIT BOTTLING RUN */}
       <Modal
         open={showBatchModal}
-        title={t(lang, 'btnNewBatch')}
+        title={editingBatch ? `${t(lang, 'editBatch')} (${editingBatch.batch_code})` : t(lang, 'btnNewBatch')}
         onClose={() => setShowBatchModal(false)}
         wide
       >
@@ -362,6 +468,7 @@ export default function Bottling({ lang }) {
                 className="select"
                 value={bForm.finished_product_id}
                 onChange={(e) => setBForm({ ...bForm, finished_product_id: e.target.value })}
+                disabled={Boolean(editingBatch)}
                 required
               >
                 <option value="">—</option>
@@ -453,21 +560,21 @@ export default function Bottling({ lang }) {
                   <span>{pickName(selectedSku, lang, 'oil_name')}</span>
                   <span className="num">
                     {t(lang, 'needed')}: <strong>{formatNum(reqOil, 2)}L</strong> ({formatNum(reqOil / 17, 2)} gal) / {t(lang, 'available')}:{' '}
-                    {formatNum(selectedSku.oil_stock_qty, 2)}L
+                    {formatNum(availOil, 2)}L
                   </span>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', color: contShort ? 'var(--clay-danger)' : undefined }}>
                   <span>{pickName(selectedSku, lang, 'container_name')}</span>
                   <span className="num">
                     {t(lang, 'needed')}: <strong>{formatNum(reqCont, 0)}</strong> / {t(lang, 'available')}:{' '}
-                    {formatNum(selectedSku.container_stock_qty, 0)}
+                    {formatNum(availCont, 0)}
                   </span>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', color: stkShort ? 'var(--clay-danger)' : undefined }}>
                   <span>{pickName(selectedSku, lang, 'sticker_name')}</span>
                   <span className="num">
                     {t(lang, 'needed')}: <strong>{formatNum(reqStk, 0)}</strong> / {t(lang, 'available')}:{' '}
-                    {formatNum(selectedSku.sticker_stock_qty, 0)}
+                    {formatNum(availStk, 0)}
                   </span>
                 </div>
                 {selectedSku.extra_material_id && reqExt > 0 && (
@@ -475,7 +582,7 @@ export default function Bottling({ lang }) {
                     <span>{pickName(selectedSku, lang, 'extra_name')}</span>
                     <span className="num">
                       {t(lang, 'needed')}: <strong>{formatNum(reqExt, 0)}</strong> / {t(lang, 'available')}:{' '}
-                      {formatNum(selectedSku.extra_stock_qty, 0)}
+                      {formatNum(availExt, 0)}
                     </span>
                   </div>
                 )}
@@ -514,10 +621,10 @@ export default function Bottling({ lang }) {
         </form>
       </Modal>
 
-      {/* MODAL: NEW FINISHED SKU & BOM */}
+      {/* MODAL: NEW / EDIT FINISHED SKU & BOM */}
       <Modal
         open={showSkuModal}
-        title={t(lang, 'btnNewSku')}
+        title={editingSkuId ? t(lang, 'editProduct') : t(lang, 'btnNewSku')}
         onClose={() => setShowSkuModal(false)}
         wide
       >
@@ -530,7 +637,13 @@ export default function Bottling({ lang }) {
                 className="input"
                 placeholder="SNW-EVOO-2000T"
                 value={skuForm.sku}
-                onChange={(e) => setSkuForm({ ...skuForm, sku: e.target.value, external_sku: e.target.value })}
+                onChange={(e) =>
+                  setSkuForm({
+                    ...skuForm,
+                    sku: e.target.value,
+                    ...(editingSkuId ? {} : { external_sku: e.target.value }),
+                  })
+                }
                 required
               />
             </div>
@@ -686,6 +799,31 @@ export default function Bottling({ lang }) {
                 onChange={(e) => setSkuForm({ ...skuForm, min_stock: e.target.value })}
               />
             </div>
+            {editingSkuId && (
+              <>
+                <div className="form-field">
+                  <label className="form-label">{t(lang, 'currentStockAdj')}</label>
+                  <input
+                    type="number"
+                    min="0"
+                    className="input"
+                    value={skuForm.stock_qty}
+                    onChange={(e) => setSkuForm({ ...skuForm, stock_qty: e.target.value })}
+                  />
+                </div>
+                <div className="form-field">
+                  <label className="form-label">{t(lang, 'unitCogs')} (EGP)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    className="input"
+                    value={skuForm.unit_cogs}
+                    onChange={(e) => setSkuForm({ ...skuForm, unit_cogs: e.target.value })}
+                  />
+                </div>
+              </>
+            )}
           </div>
 
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 18 }}>

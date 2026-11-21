@@ -311,6 +311,35 @@ async function supabaseApiFetch(path, options = {}) {
     return { material: data };
   }
 
+  const matPatchMatch = pathname.match(/^\/api\/purchases\/materials\/(\d+)$/);
+  if (matPatchMatch && method === 'PATCH') {
+    const id = Number(matPatchMatch[1]);
+    const isOil = body.category === 'oil';
+    const patch = {
+      updated_at: new Date().toISOString(),
+    };
+    if (body.code !== undefined) patch.code = String(body.code).trim().toUpperCase();
+    if (body.name !== undefined) patch.name = String(body.name).trim();
+    if (body.name_ar !== undefined) patch.name_ar = String(body.name_ar).trim();
+    if (body.category !== undefined) {
+      patch.category = body.category;
+      patch.base_unit = isOil ? 'litre' : 'pcs';
+      patch.purchase_unit = isOil ? 'gallon_17l' : 'pcs';
+      patch.container_material = body.category === 'container' ? body.container_material || 'glass' : 'none';
+      patch.capacity_ml = body.category === 'container' && body.capacity_ml ? Number(body.capacity_ml) : null;
+    }
+    if (body.units_per_purchase !== undefined && body.units_per_purchase !== '') {
+      patch.units_per_purchase = Number(body.units_per_purchase);
+    }
+    if (body.stock_qty !== undefined && body.stock_qty !== '') patch.stock_qty = Number(body.stock_qty);
+    if (body.avg_unit_cost !== undefined && body.avg_unit_cost !== '') patch.avg_unit_cost = Number(body.avg_unit_cost);
+    if (body.min_stock !== undefined && body.min_stock !== '') patch.min_stock = Number(body.min_stock);
+    if (body.notes !== undefined) patch.notes = body.notes;
+    const { data, error } = await sb.from('raw_materials').update(patch).eq('id', id).select().single();
+    if (error) throw new Error(error.message);
+    return { material: data };
+  }
+
   // Phase 1: Purchases
   if (pathname === '/api/purchases' && method === 'GET') {
     const { data, error } = await sb
@@ -358,6 +387,26 @@ async function supabaseApiFetch(path, options = {}) {
       p_payment_type: body.payment_type === 'credit' ? 'credit' : 'cash',
       p_amount_paid: body.payment_type === 'credit' ? Number(body.amount_paid || 0) : null,
       p_due_date: body.due_date || null,
+    });
+    if (error) throw new Error(error.message);
+    return { purchase: data };
+  }
+  const purchasePatchMatch = pathname.match(/^\/api\/purchases\/(\d+)$/);
+  if (purchasePatchMatch && method === 'PATCH') {
+    const { data, error } = await sb.rpc('erp_update_purchase', {
+      p_purchase_id: Number(purchasePatchMatch[1]),
+      p_raw_material_id: Number(body.raw_material_id),
+      p_purchase_qty: Number(body.purchase_qty),
+      p_unit_price: Number(body.unit_price),
+      p_units_per_purchase: Number(body.units_per_purchase) || null,
+      p_hidden_cost: Number(body.hidden_cost) || 0,
+      p_supplier_id: body.supplier_id ? Number(body.supplier_id) : null,
+      p_purchase_date: body.purchase_date || null,
+      p_harvest_lot: body.harvest_lot || '',
+      p_payment_type: body.payment_type === 'credit' ? 'credit' : 'cash',
+      p_amount_paid: body.payment_type === 'credit' ? Number(body.amount_paid || 0) : null,
+      p_due_date: body.payment_type === 'credit' && body.due_date ? body.due_date : null,
+      p_notes: body.notes || '',
     });
     if (error) throw new Error(error.message);
     return { purchase: data };
@@ -495,6 +544,34 @@ async function supabaseApiFetch(path, options = {}) {
     if (error) throw new Error(error.message);
     return { product: data };
   }
+  const prodPatchMatch = pathname.match(/^\/api\/bottling\/products\/(\d+)$/);
+  if (prodPatchMatch && method === 'PATCH') {
+    const id = Number(prodPatchMatch[1]);
+    const patch = { updated_at: new Date().toISOString() };
+    if (body.sku !== undefined) patch.sku = String(body.sku).trim().toUpperCase();
+    if (body.external_sku !== undefined) patch.external_sku = String(body.external_sku).trim();
+    if (body.name !== undefined) patch.name = String(body.name).trim();
+    if (body.name_ar !== undefined) patch.name_ar = String(body.name_ar).trim();
+    if (body.oil_type !== undefined) patch.oil_type = body.oil_type;
+    if (body.container_type !== undefined) patch.container_type = body.container_type;
+    if (body.size_ml !== undefined && body.size_ml !== '') patch.size_ml = Number(body.size_ml);
+    if (body.oil_material_id !== undefined) patch.oil_material_id = body.oil_material_id ? Number(body.oil_material_id) : null;
+    if (body.oil_litres_per_unit !== undefined && body.oil_litres_per_unit !== '') patch.oil_litres_per_unit = Number(body.oil_litres_per_unit);
+    if (body.container_material_id !== undefined) patch.container_material_id = body.container_material_id ? Number(body.container_material_id) : null;
+    if (body.containers_per_unit !== undefined && body.containers_per_unit !== '') patch.containers_per_unit = Number(body.containers_per_unit);
+    if (body.sticker_material_id !== undefined) patch.sticker_material_id = body.sticker_material_id ? Number(body.sticker_material_id) : null;
+    if (body.stickers_per_unit !== undefined && body.stickers_per_unit !== '') patch.stickers_per_unit = Number(body.stickers_per_unit);
+    if (body.extra_material_id !== undefined) patch.extra_material_id = body.extra_material_id ? Number(body.extra_material_id) : null;
+    if (body.extra_qty_per_unit !== undefined && body.extra_qty_per_unit !== '') patch.extra_qty_per_unit = Number(body.extra_qty_per_unit);
+    if (body.retail_price !== undefined && body.retail_price !== '') patch.retail_price = Number(body.retail_price);
+    if (body.min_stock !== undefined && body.min_stock !== '') patch.min_stock = Number(body.min_stock);
+    if (body.stock_qty !== undefined && body.stock_qty !== '') patch.stock_qty = Math.floor(Number(body.stock_qty));
+    if (body.unit_cogs !== undefined && body.unit_cogs !== '') patch.unit_cogs = Number(body.unit_cogs);
+    if (body.active !== undefined) patch.active = Boolean(body.active);
+    const { data, error } = await sb.from('finished_products').update(patch).eq('id', id).select().single();
+    if (error) throw new Error(error.message);
+    return { product: data };
+  }
 
   // Phase 2: Bottling Batches
   if (pathname === '/api/bottling/batches' && method === 'GET') {
@@ -518,6 +595,20 @@ async function supabaseApiFetch(path, options = {}) {
   if (pathname === '/api/bottling/batches' && method === 'POST') {
     const { data, error } = await sb.rpc('erp_run_bottling_batch', {
       p_finished_product_id: Number(body.finished_product_id),
+      p_quantity_produced: Number(body.quantity_produced),
+      p_spillage_litres: Number(body.spillage_litres || 0),
+      p_batch_hidden_cost: Number(body.batch_hidden_cost || 0),
+      p_batch_date: body.batch_date || null,
+      p_harvest_note: body.harvest_note || '',
+      p_notes: body.notes || '',
+    });
+    if (error) throw new Error(error.message);
+    return { batch: data };
+  }
+  const batchPatchMatch = pathname.match(/^\/api\/bottling\/batches\/(\d+)$/);
+  if (batchPatchMatch && method === 'PATCH') {
+    const { data, error } = await sb.rpc('erp_update_bottling_batch', {
+      p_batch_id: Number(batchPatchMatch[1]),
       p_quantity_produced: Number(body.quantity_produced),
       p_spillage_litres: Number(body.spillage_litres || 0),
       p_batch_hidden_cost: Number(body.batch_hidden_cost || 0),

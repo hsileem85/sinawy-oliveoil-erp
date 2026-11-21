@@ -278,3 +278,76 @@ test('Suppliers & Credit (آجل): Credit purchase tracks balance due and settle
   assert.equal(Number(supAfterCancel.balance_due), 7000);
 });
 
+test('Edit operations: Raw Material, Purchase, Finished Product, and Bottling Batch update atomically', async () => {
+  // 1. Edit Raw Material
+  const matsBefore = (await (await fetch(`${baseUrl}/api/purchases/materials`, { headers: { Authorization: `Bearer ${token}` } })).json()).materials;
+  const evoo = matsBefore.find((m) => m.code === 'OIL-EVOO');
+  const mEditRes = await fetch(`${baseUrl}/api/purchases/materials/${evoo.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ min_stock: 40, notes: 'Updated EVOO notes' }),
+  });
+  assert.equal(mEditRes.status, 200);
+  const { material: editedMat } = await mEditRes.json();
+  assert.equal(Number(editedMat.min_stock), 40);
+
+  // 2. Edit Purchase (increase qty by +1 gallon => +17L raw oil)
+  const pos = (await (await fetch(`${baseUrl}/api/purchases`, { headers: { Authorization: `Bearer ${token}` } })).json()).purchases;
+  const oilPo = pos.find((p) => p.raw_material_id === evoo.id);
+  const stockBeforePoEdit = Number(editedMat.stock_qty);
+  const poEditRes = await fetch(`${baseUrl}/api/purchases/${oilPo.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      raw_material_id: oilPo.raw_material_id,
+      supplier_id: oilPo.supplier_id,
+      purchase_date: String(oilPo.purchase_date).slice(0, 10),
+      purchase_qty: Number(oilPo.purchase_qty) + 1,
+      units_per_purchase: 17,
+      unit_price: Number(oilPo.unit_price),
+      hidden_cost: Number(oilPo.hidden_cost),
+      payment_type: oilPo.payment_type || 'cash',
+      amount_paid: Number(oilPo.amount_paid || 0),
+    }),
+  });
+  assert.equal(poEditRes.status, 200);
+  const evooAfterPo = (await (await fetch(`${baseUrl}/api/purchases/materials`, { headers: { Authorization: `Bearer ${token}` } })).json()).materials.find((m) => m.id === evoo.id);
+  assert.equal(Number(evooAfterPo.stock_qty), Number((stockBeforePoEdit + 17).toFixed(3)));
+
+  // 3. Edit Finished Product (retail price & min_stock)
+  const prods = (await (await fetch(`${baseUrl}/api/bottling/products`, { headers: { Authorization: `Bearer ${token}` } })).json()).products;
+  const sku = prods.find((p) => p.sku === 'SNW-EVOO-500G');
+  const pEditRes = await fetch(`${baseUrl}/api/bottling/products/${sku.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      ...sku,
+      retail_price: 410,
+      min_stock: 20,
+    }),
+  });
+  assert.equal(pEditRes.status, 200);
+  const { product: editedProd } = await pEditRes.json();
+  assert.equal(Number(editedProd.retail_price), 410);
+
+  // 4. Edit Bottling Batch (increase produced quantity by +2 bottles => finished stock +2, oil -1L)
+  const batches = (await (await fetch(`${baseUrl}/api/bottling/batches`, { headers: { Authorization: `Bearer ${token}` } })).json()).batches;
+  const batch = batches.find((b) => b.finished_product_id === sku.id);
+  const fpStockBefore = Number(editedProd.stock_qty);
+  const bEditRes = await fetch(`${baseUrl}/api/bottling/batches/${batch.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      batch_date: String(batch.batch_date).slice(0, 10),
+      quantity_produced: Number(batch.quantity_produced) + 2,
+      spillage_litres: Number(batch.spillage_litres),
+      batch_hidden_cost: Number(batch.batch_hidden_cost) + 40,
+      harvest_note: 'Updated Harvest',
+    }),
+  });
+  assert.equal(bEditRes.status, 200);
+  const skuAfterBatch = (await (await fetch(`${baseUrl}/api/bottling/products`, { headers: { Authorization: `Bearer ${token}` } })).json()).products.find((p) => p.id === sku.id);
+  assert.equal(Number(skuAfterBatch.stock_qty), fpStockBefore + 2);
+});
+
+

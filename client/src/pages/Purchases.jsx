@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Calculator, Droplets, Plus, Receipt, Trash2, Truck, Users } from 'lucide-react';
+import { Calculator, Droplets, Edit3, Plus, Receipt, Trash2, Truck, Users } from 'lucide-react';
 import { apiFetch } from '../api.js';
 import { formatEGP, formatNum, pickName, t } from '../i18n.js';
 import Modal from '../components/Modal.jsx';
@@ -16,8 +16,10 @@ export default function Purchases({ lang }) {
 
   // Modals
   const [showPurchaseModal, setShowPurchaseModal] = useState(false);
+  const [editingPurchase, setEditingPurchase] = useState(null);
   const [showHiddenModal, setShowHiddenModal] = useState(false);
   const [showMaterialModal, setShowMaterialModal] = useState(false);
+  const [editingMaterialId, setEditingMaterialId] = useState(null);
   const [showSupplierModal, setShowSupplierModal] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -57,6 +59,8 @@ export default function Purchases({ lang }) {
     capacity_ml: '500',
     units_per_purchase: '1',
     min_stock: '20',
+    stock_qty: '',
+    avg_unit_cost: '',
     notes: '',
   });
 
@@ -109,6 +113,7 @@ export default function Purchases({ lang }) {
     const defaultSup = suppliers[0];
     const today = new Date().toISOString().slice(0, 10);
     const defaultPayType = defaultSup?.default_payment_type === 'credit' ? 'credit' : 'cash';
+    setEditingPurchase(null);
     setPForm({
       purchase_date: today,
       raw_material_id: selected ? String(selected.id) : '',
@@ -124,6 +129,61 @@ export default function Purchases({ lang }) {
       notes: '',
     });
     setShowPurchaseModal(true);
+  }
+
+  function openEditPurchase(po) {
+    setEditingPurchase(po);
+    setPForm({
+      purchase_date: String(po.purchase_date).slice(0, 10),
+      raw_material_id: String(po.raw_material_id),
+      supplier_id: po.supplier_id ? String(po.supplier_id) : '',
+      purchase_qty: String(po.purchase_qty),
+      units_per_purchase: String(po.units_per_purchase ?? 1),
+      unit_price: String(po.unit_price),
+      hidden_cost: String(po.hidden_cost ?? 0),
+      harvest_lot: po.harvest_lot || '',
+      payment_type: po.payment_type === 'credit' ? 'credit' : 'cash',
+      amount_paid: String(po.amount_paid ?? 0),
+      due_date: po.due_date ? String(po.due_date).slice(0, 10) : '',
+      notes: po.notes || '',
+    });
+    setShowPurchaseModal(true);
+  }
+
+  function openNewMaterial() {
+    setEditingMaterialId(null);
+    setMForm({
+      code: '',
+      name: '',
+      name_ar: '',
+      category: 'container',
+      container_material: 'glass',
+      capacity_ml: '500',
+      units_per_purchase: '1',
+      min_stock: '20',
+      stock_qty: '',
+      avg_unit_cost: '',
+      notes: '',
+    });
+    setShowMaterialModal(true);
+  }
+
+  function openEditMaterial(mat) {
+    setEditingMaterialId(mat.id);
+    setMForm({
+      code: mat.code || '',
+      name: mat.name || '',
+      name_ar: mat.name_ar || '',
+      category: mat.category || 'container',
+      container_material: mat.container_material || 'glass',
+      capacity_ml: mat.capacity_ml ? String(mat.capacity_ml) : '500',
+      units_per_purchase: String(mat.units_per_purchase ?? (mat.category === 'oil' ? 17 : 1)),
+      min_stock: String(mat.min_stock ?? 0),
+      stock_qty: String(mat.stock_qty ?? 0),
+      avg_unit_cost: String(mat.avg_unit_cost ?? 0),
+      notes: mat.notes || '',
+    });
+    setShowMaterialModal(true);
   }
 
   function onSelectPurchaseSupplier(supId) {
@@ -163,21 +223,29 @@ export default function Purchases({ lang }) {
     setSaving(true);
     setError('');
     try {
-      await apiFetch('/api/purchases', {
-        method: 'POST',
-        body: {
-          ...pForm,
-          raw_material_id: Number(pForm.raw_material_id),
-          supplier_id: pForm.supplier_id ? Number(pForm.supplier_id) : null,
-          purchase_qty: Number(pForm.purchase_qty),
-          units_per_purchase: Number(pForm.units_per_purchase),
-          unit_price: Number(pForm.unit_price),
-          hidden_cost: Number(pForm.hidden_cost) || 0,
-          payment_type: pForm.payment_type,
-          amount_paid: pForm.payment_type === 'credit' ? Number(pForm.amount_paid || 0) : previewLanded,
-          due_date: pForm.payment_type === 'credit' && pForm.due_date ? pForm.due_date : null,
-        },
-      });
+      const payload = {
+        ...pForm,
+        raw_material_id: Number(pForm.raw_material_id),
+        supplier_id: pForm.supplier_id ? Number(pForm.supplier_id) : null,
+        purchase_qty: Number(pForm.purchase_qty),
+        units_per_purchase: Number(pForm.units_per_purchase),
+        unit_price: Number(pForm.unit_price),
+        hidden_cost: Number(pForm.hidden_cost) || 0,
+        payment_type: pForm.payment_type,
+        amount_paid: pForm.payment_type === 'credit' ? Number(pForm.amount_paid || 0) : previewLanded,
+        due_date: pForm.payment_type === 'credit' && pForm.due_date ? pForm.due_date : null,
+      };
+      if (editingPurchase) {
+        await apiFetch(`/api/purchases/${editingPurchase.id}`, {
+          method: 'PATCH',
+          body: payload,
+        });
+      } else {
+        await apiFetch('/api/purchases', {
+          method: 'POST',
+          body: payload,
+        });
+      }
       setShowPurchaseModal(false);
       await loadAll();
     } catch (err) {
@@ -221,19 +289,32 @@ export default function Purchases({ lang }) {
     setError('');
     try {
       const isOil = mForm.category === 'oil';
-      await apiFetch('/api/purchases/materials', {
-        method: 'POST',
-        body: {
-          ...mForm,
-          base_unit: isOil ? 'litre' : 'pcs',
-          purchase_unit: isOil ? 'gallon_17l' : 'pcs',
-          units_per_purchase: isOil ? Number(mForm.units_per_purchase || 17) : 1,
-          capacity_ml: mForm.category === 'container' ? Number(mForm.capacity_ml || 500) : null,
-          min_stock: Number(mForm.min_stock || 0),
-        },
-      });
+      const payload = {
+        ...mForm,
+        base_unit: isOil ? 'litre' : 'pcs',
+        purchase_unit: isOil ? 'gallon_17l' : 'pcs',
+        units_per_purchase: isOil ? Number(mForm.units_per_purchase || 17) : 1,
+        capacity_ml: mForm.category === 'container' ? Number(mForm.capacity_ml || 500) : null,
+        min_stock: Number(mForm.min_stock || 0),
+        ...(editingMaterialId
+          ? {
+              stock_qty: mForm.stock_qty !== '' ? Number(mForm.stock_qty) : undefined,
+              avg_unit_cost: mForm.avg_unit_cost !== '' ? Number(mForm.avg_unit_cost) : undefined,
+            }
+          : {}),
+      };
+      if (editingMaterialId) {
+        await apiFetch(`/api/purchases/materials/${editingMaterialId}`, {
+          method: 'PATCH',
+          body: payload,
+        });
+      } else {
+        await apiFetch('/api/purchases/materials', {
+          method: 'POST',
+          body: payload,
+        });
+      }
       setShowMaterialModal(false);
-      setMForm({ code: '', name: '', name_ar: '', category: 'container', container_material: 'glass', capacity_ml: '500', units_per_purchase: '1', min_stock: '20', notes: '' });
       await loadAll();
     } catch (err) {
       setError(err.message);
@@ -273,7 +354,7 @@ export default function Purchases({ lang }) {
             <Receipt size={15} />
             {t(lang, 'btnNewHiddenCost')}
           </button>
-          <button type="button" className="btn btn-secondary" onClick={() => setShowMaterialModal(true)}>
+          <button type="button" className="btn btn-secondary" onClick={openNewMaterial}>
             <Plus size={15} />
             {t(lang, 'btnNewMaterial')}
           </button>
@@ -377,13 +458,23 @@ export default function Purchases({ lang }) {
                           </td>
                           <td className="num cell-main">{formatEGP(val, lang)}</td>
                           <td>
-                            <button
-                              type="button"
-                              className="btn btn-secondary btn-sm"
-                              onClick={() => openPurchaseFor(m)}
-                            >
-                              + {t(lang, 'btnNewPurchase')}
-                            </button>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <button
+                                type="button"
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => openPurchaseFor(m)}
+                              >
+                                + {t(lang, 'btnNewPurchase')}
+                              </button>
+                              <button
+                                type="button"
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => openEditMaterial(m)}
+                                aria-label={t(lang, 'edit')}
+                              >
+                                <Edit3 size={13} />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -411,6 +502,7 @@ export default function Purchases({ lang }) {
                   <th>{t(lang, 'totalLanded')}</th>
                   <th>{t(lang, 'paymentType')}</th>
                   <th>{t(lang, 'landedPerUnit')}</th>
+                  <th>{t(lang, 'actions')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -459,6 +551,16 @@ export default function Purchases({ lang }) {
                         <span className="badge badge-olive">
                           {formatEGP(p.landed_cost_per_base_unit, lang)} / {p.base_unit === 'litre' ? t(lang, 'litres') : t(lang, 'pcs')}
                         </span>
+                      </td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => openEditPurchase(p)}
+                          aria-label={t(lang, 'edit')}
+                        >
+                          <Edit3 size={13} />
+                        </button>
                       </td>
                     </tr>
                   );
@@ -574,10 +676,10 @@ export default function Purchases({ lang }) {
         </div>
       )}
 
-      {/* MODAL: RECORD PURCHASE */}
+      {/* MODAL: RECORD / EDIT PURCHASE */}
       <Modal
         open={showPurchaseModal}
-        title={t(lang, 'btnNewPurchase')}
+        title={editingPurchase ? `${t(lang, 'editPurchase')} (${editingPurchase.reference_no})` : t(lang, 'btnNewPurchase')}
         onClose={() => setShowPurchaseModal(false)}
         wide
       >
@@ -884,10 +986,10 @@ export default function Purchases({ lang }) {
         </form>
       </Modal>
 
-      {/* MODAL: NEW RAW MATERIAL */}
+      {/* MODAL: NEW / EDIT RAW MATERIAL */}
       <Modal
         open={showMaterialModal}
-        title={t(lang, 'btnNewMaterial')}
+        title={editingMaterialId ? t(lang, 'editMaterial') : t(lang, 'btnNewMaterial')}
         onClose={() => setShowMaterialModal(false)}
       >
         <form onSubmit={submitMaterial}>
@@ -984,6 +1086,43 @@ export default function Purchases({ lang }) {
                 className="input"
                 value={mForm.min_stock}
                 onChange={(e) => setMForm({ ...mForm, min_stock: e.target.value })}
+              />
+            </div>
+            {editingMaterialId && (
+              <>
+                <div className="form-field">
+                  <label className="form-label">
+                    {t(lang, 'currentStockAdj')} ({mForm.category === 'oil' ? t(lang, 'litres') : t(lang, 'pcs')})
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    className="input"
+                    value={mForm.stock_qty}
+                    onChange={(e) => setMForm({ ...mForm, stock_qty: e.target.value })}
+                  />
+                </div>
+                <div className="form-field">
+                  <label className="form-label">{t(lang, 'avgCostAdj')}</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    className="input"
+                    value={mForm.avg_unit_cost}
+                    onChange={(e) => setMForm({ ...mForm, avg_unit_cost: e.target.value })}
+                  />
+                </div>
+              </>
+            )}
+            <div className="form-field full">
+              <label className="form-label">{t(lang, 'notes')}</label>
+              <input
+                type="text"
+                className="input"
+                value={mForm.notes}
+                onChange={(e) => setMForm({ ...mForm, notes: e.target.value })}
               />
             </div>
           </div>

@@ -336,20 +336,90 @@ router.post('/materials', async (req, res) => {
 router.patch('/materials/:id', async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const { name, name_ar, min_stock, notes } = req.body || {};
-    const result = await query(
-      `UPDATE raw_materials
-       SET name = COALESCE($1, name),
-           name_ar = COALESCE($2, name_ar),
-           min_stock = COALESCE($3, min_stock),
-           notes = COALESCE($4, notes),
-           updated_at = NOW()
-       WHERE id = $5 RETURNING *`,
-      [name || null, name_ar || null, min_stock !== undefined ? Number(min_stock) : null, notes ?? null, id]
-    );
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Material not found' });
-    res.json({ material: result.rows[0] });
+    const {
+      code,
+      name,
+      name_ar,
+      category,
+      container_material,
+      capacity_ml,
+      units_per_purchase,
+      stock_qty,
+      avg_unit_cost,
+      min_stock,
+      notes,
+    } = req.body || {};
+
+    const updated = await withTransaction(async (tx) => {
+      const curRes = await tx.query('SELECT * FROM raw_materials WHERE id = $1', [id]);
+      if (curRes.rows.length === 0) {
+        const e = new Error('Material not found');
+        e.status = 404;
+        throw e;
+      }
+      const cur = curRes.rows[0];
+      const nextCat = category || cur.category;
+      const isOil = nextCat === 'oil';
+      const nextBaseUnit = isOil ? 'litre' : 'pcs';
+      const nextPurchaseUnit = isOil ? 'gallon_17l' : 'pcs';
+      const nextStock = stock_qty !== undefined && stock_qty !== '' ? Number(stock_qty) : Number(cur.stock_qty);
+      const nextAvg = avg_unit_cost !== undefined && avg_unit_cost !== '' ? Number(avg_unit_cost) : Number(cur.avg_unit_cost);
+      const delta = Number((nextStock - Number(cur.stock_qty)).toFixed(3));
+
+      const r = await tx.query(
+        `UPDATE raw_materials
+         SET code = COALESCE($1, code),
+             name = COALESCE($2, name),
+             name_ar = COALESCE($3, name_ar),
+             category = $4,
+             container_material = $5,
+             capacity_ml = $6,
+             base_unit = $7,
+             purchase_unit = $8,
+             units_per_purchase = COALESCE($9, units_per_purchase),
+             stock_qty = $10,
+             avg_unit_cost = $11,
+             min_stock = COALESCE($12, min_stock),
+             notes = COALESCE($13, notes),
+             updated_at = NOW()
+         WHERE id = $14 RETURNING *`,
+        [
+          code?.trim() ? code.trim().toUpperCase() : null,
+          name?.trim() || null,
+          name_ar?.trim() || null,
+          nextCat,
+          nextCat === 'container' ? container_material || cur.container_material || 'glass' : 'none',
+          nextCat === 'container'
+            ? capacity_ml !== undefined && capacity_ml !== ''
+              ? Number(capacity_ml)
+              : cur.capacity_ml
+            : null,
+          nextBaseUnit,
+          nextPurchaseUnit,
+          units_per_purchase !== undefined && units_per_purchase !== '' ? Number(units_per_purchase) : null,
+          nextStock,
+          nextAvg,
+          min_stock !== undefined && min_stock !== '' ? Number(min_stock) : null,
+          notes ?? null,
+          id,
+        ]
+      );
+
+      if (Math.abs(delta) > 0.0001) {
+        await tx.query(
+          `INSERT INTO stock_movements (item_type, item_id, movement_type, qty_delta, unit_cost, reference_no, notes)
+           VALUES ('raw', $1, 'adjustment', $2, $3, 'MANUAL-ADJ', 'Manual material stock edit')`,
+          [id, delta, nextAvg]
+        );
+      }
+
+      return r.rows[0];
+    });
+
+    res.json({ material: updated });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    if (err.code === '23505') return res.status(409).json({ error: 'A raw material with this code already exists' });
     console.error('Update material error:', err);
     res.status(500).json({ error: 'Failed to update material' });
   }
@@ -519,6 +589,173 @@ router.post('/', async (req, res) => {
     if (err.status) return res.status(err.status).json({ error: err.message });
     console.error('Create purchase error:', err);
     res.status(500).json({ error: 'Failed to record purchase' });
+  }
+});
+
+router.patch('/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const {
+      purchase_date,
+      supplier_id = null,
+      raw_material_id,
+      purchase_qty,
+      units_per_purchase,
+      unit_price,
+      hidden_cost = 0,
+      harvest_lot = '',
+      payment_type = 'cash',
+      amount_paid,
+      due_date = null,
+      notes = '',
+    } = req.body || {};
+
+    const qty = Number(purchase_qty);
+    const price = Number(unit_price);
+    const extraCost = Number(hidden_cost) || 0;
+
+    if (!raw_material_id || !(qty > 0) || !(price >= 0) || extraCost < 0) {
+      return res.status(400).json({ error: 'Valid material, quantity (>0), and unit price are required' });
+    }
+
+    const updated = await withTransaction(async (tx) => {
+      const oldRes = await tx.query('SELECT * FROM purchases WHERE id = $1', [id]);
+      if (oldRes.rows.length === 0) {
+        const e = new Error('Purchase not found');
+        e.status = 404;
+        throw e;
+      }
+      const old = oldRes.rows[0];
+
+      const newMatRes = await tx.query('SELECT * FROM raw_materials WHERE id = $1', [Number(raw_material_id)]);
+      if (newMatRes.rows.length === 0) {
+        const e = new Error('Raw material not found');
+        e.status = 404;
+        throw e;
+      }
+      const newMat = newMatRes.rows[0];
+
+      const factor = Number(units_per_purchase) > 0 ? Number(units_per_purchase) : Number(newMat.units_per_purchase) || 1;
+      const baseQty = Number((qty * factor).toFixed(3));
+      const subtotal = Number((qty * price).toFixed(2));
+      const totalLanded = Number((subtotal + extraCost).toFixed(2));
+      const landedPerBase = Number((totalLanded / baseQty).toFixed(4));
+
+      const resolvedPayType = payment_type === 'credit' ? 'credit' : 'cash';
+      let resolvedPaid = totalLanded;
+      let resolvedPayStatus = 'paid';
+      if (resolvedPayType === 'credit') {
+        const rawPaid = amount_paid !== undefined && amount_paid !== null ? Number(amount_paid) : Number(old.amount_paid || 0);
+        resolvedPaid = Number(Math.min(totalLanded, Math.max(0, rawPaid)).toFixed(2));
+        resolvedPayStatus = resolvedPaid >= totalLanded ? 'paid' : resolvedPaid > 0 ? 'partial' : 'unpaid';
+      }
+
+      if (Number(old.raw_material_id) === Number(raw_material_id)) {
+        const deltaQty = Number((baseQty - Number(old.base_qty)).toFixed(3));
+        const nextQty = Math.max(0, Number((Number(newMat.stock_qty) + deltaQty).toFixed(3)));
+        const nextVal = Math.max(0, Number(newMat.stock_qty) * Number(newMat.avg_unit_cost) - Number(old.total_landed_cost) + totalLanded);
+        const nextAvg = nextQty > 0 ? Number((nextVal / nextQty).toFixed(4)) : landedPerBase;
+
+        await tx.query('UPDATE raw_materials SET stock_qty = $1, avg_unit_cost = $2, updated_at = NOW() WHERE id = $3', [
+          nextQty,
+          nextAvg,
+          newMat.id,
+        ]);
+
+        if (deltaQty !== 0) {
+          await tx.query(
+            `INSERT INTO stock_movements (item_type, item_id, movement_type, qty_delta, unit_cost, reference_no, notes)
+             VALUES ('raw', $1, 'adjustment', $2, $3, $4, 'Purchase edited')`,
+            [newMat.id, deltaQty, landedPerBase, old.reference_no]
+          );
+        }
+      } else {
+        const oldMat = (await tx.query('SELECT * FROM raw_materials WHERE id = $1', [old.raw_material_id])).rows[0];
+        const oldNextQty = Math.max(0, Number((Number(oldMat.stock_qty) - Number(old.base_qty)).toFixed(3)));
+        const oldNextVal = Math.max(0, Number(oldMat.stock_qty) * Number(oldMat.avg_unit_cost) - Number(old.total_landed_cost));
+        const oldNextAvg = oldNextQty > 0 ? Number((oldNextVal / oldNextQty).toFixed(4)) : Number(oldMat.avg_unit_cost);
+        await tx.query('UPDATE raw_materials SET stock_qty = $1, avg_unit_cost = $2, updated_at = NOW() WHERE id = $3', [
+          oldNextQty,
+          oldNextAvg,
+          oldMat.id,
+        ]);
+
+        const newNextQty = Number((Number(newMat.stock_qty) + baseQty).toFixed(3));
+        const newNextVal = Number(newMat.stock_qty) * Number(newMat.avg_unit_cost) + totalLanded;
+        const newNextAvg = newNextQty > 0 ? Number((newNextVal / newNextQty).toFixed(4)) : landedPerBase;
+        await tx.query('UPDATE raw_materials SET stock_qty = $1, avg_unit_cost = $2, updated_at = NOW() WHERE id = $3', [
+          newNextQty,
+          newNextAvg,
+          newMat.id,
+        ]);
+      }
+
+      const uRes = await tx.query(
+        `UPDATE purchases
+         SET purchase_date = COALESCE($1::date, purchase_date),
+             supplier_id = $2,
+             raw_material_id = $3,
+             purchase_qty = $4,
+             units_per_purchase = $5,
+             base_qty = $6,
+             unit_price = $7,
+             subtotal = $8,
+             hidden_cost = $9,
+             total_landed_cost = $10,
+             landed_cost_per_base_unit = $11,
+             harvest_lot = $12,
+             payment_type = $13,
+             amount_paid = $14,
+             due_date = $15::date,
+             payment_status = $16,
+             notes = $17
+         WHERE id = $18 RETURNING *`,
+        [
+          purchase_date || null,
+          supplier_id ? Number(supplier_id) : null,
+          Number(raw_material_id),
+          qty,
+          factor,
+          baseQty,
+          price,
+          subtotal,
+          extraCost,
+          totalLanded,
+          landedPerBase,
+          harvest_lot,
+          resolvedPayType,
+          resolvedPaid,
+          resolvedPayType === 'credit' ? due_date || null : null,
+          resolvedPayStatus,
+          notes,
+          id,
+        ]
+      );
+
+      await tx.query("DELETE FROM hidden_costs WHERE allocation_scope = 'purchase' AND related_ref = $1", [old.reference_no]);
+      if (extraCost > 0) {
+        await tx.query(
+          `INSERT INTO hidden_costs (cost_date, category, title, title_ar, amount, allocation_scope, related_ref, notes)
+           VALUES (COALESCE($1::date, CURRENT_DATE), 'shipping_inbound', $2, $3, $4, 'purchase', $5, $6)`,
+          [
+            purchase_date || old.purchase_date,
+            `Purchase landed hidden cost (${newMat.name})`,
+            `تكلفة خفية للمشتريات (${newMat.name_ar || newMat.name})`,
+            extraCost,
+            old.reference_no,
+            notes || 'Absorbed into raw material landed unit cost',
+          ]
+        );
+      }
+
+      return uRes.rows[0];
+    });
+
+    res.json({ purchase: updated });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    console.error('Update purchase error:', err);
+    res.status(500).json({ error: 'Failed to update purchase' });
   }
 });
 
