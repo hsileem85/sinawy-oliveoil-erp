@@ -255,6 +255,7 @@ test('Suppliers & Credit (آجل): Credit purchase tracks balance due and settle
     }),
   });
   assert.equal(payRes.status, 201);
+  const { payment } = await payRes.json();
 
   // 5. Verify supplier balance_due is now 0
   const listRes2 = await fetch(`${baseUrl}/api/purchases/suppliers`, {
@@ -262,5 +263,18 @@ test('Suppliers & Credit (آجل): Credit purchase tracks balance due and settle
   });
   const supAfterPay = (await listRes2.json()).suppliers.find((s) => s.id === supplier.id);
   assert.equal(Number(supAfterPay.balance_due), 0);
+
+  // 6. Cancel the settlement payment and verify balance_due restores to 7,000
+  const cancelPayRes = await fetch(`${baseUrl}/api/purchases/supplier-payments/${payment.id}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(cancelPayRes.status, 200);
+
+  const listRes3 = await fetch(`${baseUrl}/api/purchases/suppliers`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const supAfterCancel = (await listRes3.json()).suppliers.find((s) => s.id === supplier.id);
+  assert.equal(Number(supAfterCancel.balance_due), 7000);
 });
 

@@ -194,6 +194,76 @@ router.post('/supplier-payments', async (req, res) => {
   }
 });
 
+router.delete('/supplier-payments/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const result = await withTransaction(async (tx) => {
+      const pRes = await tx.query('SELECT * FROM supplier_payments WHERE id = $1', [id]);
+      if (pRes.rows.length === 0) {
+        const e = new Error('Supplier payment not found');
+        e.status = 404;
+        throw e;
+      }
+      const pay = pRes.rows[0];
+      let remaining = Number(pay.amount);
+
+      if (pay.purchase_id) {
+        const poRes = await tx.query(
+          'SELECT id, total_landed_cost, amount_paid FROM purchases WHERE id = $1 AND supplier_id = $2',
+          [pay.purchase_id, pay.supplier_id]
+        );
+        if (poRes.rows.length > 0 && Number(poRes.rows[0].amount_paid) > 0) {
+          const po = poRes.rows[0];
+          const deduct = Math.min(remaining, Number(po.amount_paid));
+          const nextPaid = Number(Math.max(0, Number(po.amount_paid) - deduct).toFixed(2));
+          await tx.query(
+            `UPDATE purchases
+             SET amount_paid = $1,
+                 payment_status = CASE WHEN $1 >= total_landed_cost THEN 'paid' WHEN $1 > 0 THEN 'partial' ELSE 'unpaid' END
+             WHERE id = $2`,
+            [nextPaid, po.id]
+          );
+          remaining = Number((remaining - deduct).toFixed(2));
+        }
+      }
+
+      if (remaining > 0) {
+        const pos = await tx.query(
+          `SELECT id, total_landed_cost, amount_paid
+           FROM purchases
+           WHERE supplier_id = $1 AND amount_paid > 0
+           ORDER BY CASE WHEN payment_type = 'credit' THEN 0 ELSE 1 END ASC, purchase_date DESC, id DESC`,
+          [pay.supplier_id]
+        );
+        for (const po of pos.rows) {
+          if (remaining <= 0) break;
+          const deduct = Math.min(remaining, Number(po.amount_paid));
+          if (deduct > 0) {
+            const nextPaid = Number(Math.max(0, Number(po.amount_paid) - deduct).toFixed(2));
+            await tx.query(
+              `UPDATE purchases
+               SET amount_paid = $1,
+                   payment_status = CASE WHEN $1 >= total_landed_cost THEN 'paid' WHEN $1 > 0 THEN 'partial' ELSE 'unpaid' END
+               WHERE id = $2`,
+              [nextPaid, po.id]
+            );
+            remaining = Number((remaining - deduct).toFixed(2));
+          }
+        }
+      }
+
+      await tx.query('DELETE FROM supplier_payments WHERE id = $1', [id]);
+      return pay;
+    });
+
+    res.json({ ok: true, cancelled_payment: result });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    console.error('Cancel supplier payment error:', err);
+    res.status(500).json({ error: 'Failed to cancel supplier payment' });
+  }
+});
+
 /* ==================== RAW MATERIALS ==================== */
 router.get('/materials', async (_req, res) => {
   const result = await query(

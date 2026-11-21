@@ -44,6 +44,8 @@ const translations = {
     autoFifoHint: 'Leave invoice empty to settle oldest unpaid Credit (Agel) invoices automatically.',
     specificInvoice: 'Purchase Invoice (Optional)',
     edit: 'Edit',
+    cancelPayment: 'Cancel Payment',
+    confirmCancelPayment: 'Cancel this payment? The amount will be restored to the supplier’s Credit (Agel) balance due.',
     logout: 'Sign Out',
     langSwitch: 'العربية',
     // Auth
@@ -287,6 +289,8 @@ const translations = {
     autoFifoHint: 'اترك الفاتورة فارغة لتسوية أقدم فواتير الآجل تلقائياً.',
     specificInvoice: 'فاتورة شراء محددة (اختياري)',
     edit: 'تعديل',
+    cancelPayment: 'إلغاء الدفعة',
+    confirmCancelPayment: 'هل أنت متأكد من إلغاء هذه الدفعة؟ سيتم إعادة المبلغ إلى رصيد الآجل المستحق للمورد.',
     logout: 'تسجيل الخروج',
     langSwitch: 'English',
     // Auth

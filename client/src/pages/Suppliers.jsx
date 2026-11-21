@@ -5,6 +5,7 @@ import {
   Edit3,
   Plus,
   Receipt,
+  RotateCcw,
   Trash2,
   Users,
   Wallet,
@@ -174,6 +175,19 @@ export default function Suppliers({ lang }) {
       setError(err.message);
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function cancelPayment(paymentId) {
+    if (!window.confirm(t(lang, 'confirmCancelPayment'))) return;
+    setError('');
+    try {
+      await apiFetch(`/api/purchases/supplier-payments/${paymentId}`, {
+        method: 'DELETE',
+      });
+      await loadAll();
+    } catch (err) {
+      setError(err.message);
     }
   }
 
@@ -419,11 +433,12 @@ export default function Suppliers({ lang }) {
                   <th>{t(lang, 'paymentStatus')}</th>
                   <th>{t(lang, 'egp')}</th>
                   <th>{t(lang, 'notes')}</th>
+                  <th>{t(lang, 'actions')}</th>
                 </tr>
               </thead>
               <tbody>
                 {payments.length === 0 ? (
-                  <tr><td colSpan="5">{t(lang, 'noData')}</td></tr>
+                  <tr><td colSpan="6">{t(lang, 'noData')}</td></tr>
                 ) : (
                   payments.map((pm) => (
                     <tr key={pm.id}>
@@ -438,6 +453,16 @@ export default function Suppliers({ lang }) {
                       </td>
                       <td className="num val-positive">{formatEGP(pm.amount, lang)}</td>
                       <td className="cell-sub">{pm.notes || '—'}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="btn btn-danger-ghost btn-sm"
+                          onClick={() => cancelPayment(pm.id)}
+                        >
+                          <RotateCcw size={13} />
+                          {t(lang, 'cancelPayment')}
+                        </button>
+                      </td>
                     </tr>
                   ))
                 )}

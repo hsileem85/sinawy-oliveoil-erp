@@ -263,6 +263,14 @@ async function supabaseApiFetch(path, options = {}) {
     if (error) throw new Error(error.message);
     return { payment: data };
   }
+  const supPayDelMatch = pathname.match(/^\/api\/purchases\/supplier-payments\/(\d+)$/);
+  if (supPayDelMatch && method === 'DELETE') {
+    const { data, error } = await sb.rpc('erp_cancel_supplier_payment', {
+      p_payment_id: Number(supPayDelMatch[1]),
+    });
+    if (error) throw new Error(error.message);
+    return data;
+  }
 
   // Phase 1: Raw Materials
   if (pathname === '/api/purchases/materials' && method === 'GET') {
