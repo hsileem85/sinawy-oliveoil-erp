@@ -521,10 +521,7 @@ export default function Sales({ lang }) {
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
               {oForm.items.map((li, idx) => (
-                <div
-                  key={idx}
-                  style={{ display: 'grid', gridTemplateColumns: '1.8fr 0.6fr 0.8fr auto', gap: 8, alignItems: 'center' }}
-                >
+                <div key={idx} className="order-item-row">
                   <select
                     className="select"
                     value={li.finished_product_id}
@@ -540,6 +537,8 @@ export default function Sales({ lang }) {
                     type="number"
                     min="1"
                     className="input"
+                    placeholder="Qty"
+                    aria-label="Quantity"
                     value={li.quantity}
                     onChange={(e) => updateLineItem(idx, { quantity: e.target.value })}
                     required
@@ -549,6 +548,8 @@ export default function Sales({ lang }) {
                     min="0"
                     step="1"
                     className="input"
+                    placeholder={t(lang, 'egp')}
+                    aria-label="Unit Price"
                     value={li.unit_price}
                     onChange={(e) => updateLineItem(idx, { unit_price: e.target.value })}
                     required
@@ -558,6 +559,7 @@ export default function Sales({ lang }) {
                     className="btn btn-danger-ghost btn-sm"
                     onClick={() => removeLineItem(idx)}
                     disabled={oForm.items.length <= 1}
+                    aria-label={t(lang, 'delete')}
                   >
                     <Trash2 size={14} />
                   </button>

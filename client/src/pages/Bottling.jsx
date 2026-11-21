@@ -555,22 +555,22 @@ export default function Bottling({ lang }) {
                 <Calculator size={15} />
                 {t(lang, 'bomCheckTitle')}
               </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12, fontSize: 13 }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: oilShort ? 'var(--clay-danger)' : undefined }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12, fontSize: 13 }}>
+                <div className="bom-check-row" style={{ color: oilShort ? 'var(--clay-danger)' : undefined }}>
                   <span>{pickName(selectedSku, lang, 'oil_name')}</span>
                   <span className="num">
                     {t(lang, 'needed')}: <strong>{formatNum(reqOil, 2)}L</strong> ({formatNum(reqOil / 17, 2)} gal) / {t(lang, 'available')}:{' '}
                     {formatNum(availOil, 2)}L
                   </span>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: contShort ? 'var(--clay-danger)' : undefined }}>
+                <div className="bom-check-row" style={{ color: contShort ? 'var(--clay-danger)' : undefined }}>
                   <span>{pickName(selectedSku, lang, 'container_name')}</span>
                   <span className="num">
                     {t(lang, 'needed')}: <strong>{formatNum(reqCont, 0)}</strong> / {t(lang, 'available')}:{' '}
                     {formatNum(availCont, 0)}
                   </span>
                 </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', color: stkShort ? 'var(--clay-danger)' : undefined }}>
+                <div className="bom-check-row" style={{ color: stkShort ? 'var(--clay-danger)' : undefined }}>
                   <span>{pickName(selectedSku, lang, 'sticker_name')}</span>
                   <span className="num">
                     {t(lang, 'needed')}: <strong>{formatNum(reqStk, 0)}</strong> / {t(lang, 'available')}:{' '}
@@ -578,7 +578,7 @@ export default function Bottling({ lang }) {
                   </span>
                 </div>
                 {selectedSku.extra_material_id && reqExt > 0 && (
-                  <div style={{ display: 'flex', justifyContent: 'space-between', color: extShort ? 'var(--clay-danger)' : undefined }}>
+                  <div className="bom-check-row" style={{ color: extShort ? 'var(--clay-danger)' : undefined }}>
                     <span>{pickName(selectedSku, lang, 'extra_name')}</span>
                     <span className="num">
                       {t(lang, 'needed')}: <strong>{formatNum(reqExt, 0)}</strong> / {t(lang, 'available')}:{' '}

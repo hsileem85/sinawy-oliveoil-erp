@@ -205,14 +205,13 @@ curl -X GET "${stockFeedUrl}" \\
             <KeyRound size={17} />
             {t(lang, 'apiKeysTitle')}
           </h2>
-          <form onSubmit={createApiKey} style={{ display: 'flex', gap: 8 }}>
+          <form onSubmit={createApiKey} className="inline-form">
             <input
               type="text"
               className="input"
               placeholder={t(lang, 'keyNamePlaceholder')}
               value={newKeyName}
               onChange={(e) => setNewKeyName(e.target.value)}
-              style={{ width: 220 }}
             />
             <button type="submit" className="btn btn-primary btn-sm">
               <Plus size={14} />

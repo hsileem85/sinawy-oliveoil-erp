@@ -178,6 +178,23 @@ export default function App() {
           {page === 'sales' && <Sales lang={lang} />}
           {page === 'integrations' && <Integrations lang={lang} />}
         </main>
+
+        <nav className="mobile-bottom-nav" aria-label="Mobile Navigation">
+          {navItems.slice(0, 5).map((item) => {
+            const Icon = item.icon;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={`mobile-bottom-btn ${page === item.id ? 'active' : ''}`}
+                onClick={() => setPage(item.id)}
+              >
+                <Icon size={18} />
+                <span>{item.label.replace(/^[١٢٣123]\.\s*/, '')}</span>
+              </button>
+            );
+          })}
+        </nav>
       </div>
     </div>
   );
