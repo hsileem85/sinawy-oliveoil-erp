@@ -155,11 +155,44 @@ async function supabaseApiFetch(path, options = {}) {
     return data;
   }
 
-  // Phase 1: Suppliers
+  // Phase 1: Suppliers (with live balance_due calculation)
   if (pathname === '/api/purchases/suppliers' && method === 'GET') {
-    const { data, error } = await sb.from('suppliers').select('*').order('name', { ascending: true });
-    if (error) throw new Error(error.message);
-    return { suppliers: data || [] };
+    const [{ data: sups, error: e1 }, { data: pos, error: e2 }] = await Promise.all([
+      sb.from('suppliers').select('*').order('name', { ascending: true }),
+      sb.from('purchases').select('supplier_id, total_landed_cost, amount_paid, payment_status'),
+    ]);
+    if (e1) throw new Error(e1.message);
+    if (e2) throw new Error(e2.message);
+
+    const stats = {};
+    for (const p of pos || []) {
+      if (!p.supplier_id) continue;
+      if (!stats[p.supplier_id]) stats[p.supplier_id] = { count: 0, total: 0, paid: 0, due: 0 };
+      const tot = Number(p.total_landed_cost || 0);
+      const paid = p.amount_paid !== undefined && p.amount_paid !== null
+        ? Number(p.amount_paid)
+        : p.payment_status === 'paid'
+          ? tot
+          : 0;
+      stats[p.supplier_id].count += 1;
+      stats[p.supplier_id].total += tot;
+      stats[p.supplier_id].paid += paid;
+      stats[p.supplier_id].due += Math.max(0, tot - paid);
+    }
+
+    const suppliers = (sups || []).map((s) => {
+      const st = stats[s.id] || { count: 0, total: 0, paid: 0, due: 0 };
+      return {
+        ...s,
+        default_payment_type: s.default_payment_type || 'cash',
+        credit_days: Number(s.credit_days || 0),
+        purchase_count: st.count,
+        total_purchased: Number(st.total.toFixed(2)),
+        total_paid: Number(st.paid.toFixed(2)),
+        balance_due: Number(st.due.toFixed(2)),
+      };
+    });
+    return { suppliers };
   }
   if (pathname === '/api/purchases/suppliers' && method === 'POST') {
     const { data, error } = await sb
@@ -170,12 +203,65 @@ async function supabaseApiFetch(path, options = {}) {
         category: body.category || 'general',
         phone: body.phone || '',
         city: body.city || '',
+        default_payment_type: body.default_payment_type === 'credit' ? 'credit' : 'cash',
+        credit_days: Number(body.credit_days || 0),
         notes: body.notes || '',
       })
       .select()
       .single();
     if (error) throw new Error(error.message);
     return { supplier: data };
+  }
+  const supIdMatch = pathname.match(/^\/api\/purchases\/suppliers\/(\d+)$/);
+  if (supIdMatch && method === 'PATCH') {
+    const id = Number(supIdMatch[1]);
+    const patch = {};
+    if (body.name !== undefined) patch.name = body.name.trim();
+    if (body.name_ar !== undefined) patch.name_ar = body.name_ar.trim();
+    if (body.category !== undefined) patch.category = body.category;
+    if (body.phone !== undefined) patch.phone = body.phone;
+    if (body.city !== undefined) patch.city = body.city;
+    if (body.default_payment_type !== undefined) patch.default_payment_type = body.default_payment_type;
+    if (body.credit_days !== undefined) patch.credit_days = Number(body.credit_days || 0);
+    if (body.notes !== undefined) patch.notes = body.notes;
+    const { data, error } = await sb.from('suppliers').update(patch).eq('id', id).select().single();
+    if (error) throw new Error(error.message);
+    return { supplier: data };
+  }
+  if (supIdMatch && method === 'DELETE') {
+    const { error } = await sb.from('suppliers').delete().eq('id', Number(supIdMatch[1]));
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  }
+
+  // Phase 1: Supplier Payments (آجل settlements)
+  if (pathname === '/api/purchases/supplier-payments' && method === 'GET') {
+    const { data, error } = await sb
+      .from('supplier_payments')
+      .select(`*, suppliers ( name, name_ar ), purchases ( reference_no )`)
+      .order('payment_date', { ascending: false })
+      .order('id', { ascending: false });
+    if (error) throw new Error(error.message);
+    const payments = (data || []).map((sp) => ({
+      ...sp,
+      supplier_name: sp.suppliers?.name,
+      supplier_name_ar: sp.suppliers?.name_ar,
+      purchase_ref: sp.purchases?.reference_no,
+    }));
+    return { payments };
+  }
+  if (pathname === '/api/purchases/supplier-payments' && method === 'POST') {
+    const { data, error } = await sb.rpc('erp_record_supplier_payment', {
+      p_supplier_id: Number(body.supplier_id),
+      p_amount: Number(body.amount),
+      p_payment_method: body.payment_method || 'cash',
+      p_payment_date: body.payment_date || null,
+      p_purchase_id: body.purchase_id ? Number(body.purchase_id) : null,
+      p_reference_no: body.reference_no || '',
+      p_notes: body.notes || '',
+    });
+    if (error) throw new Error(error.message);
+    return { payment: data };
   }
 
   // Phase 1: Raw Materials
@@ -229,17 +315,24 @@ async function supabaseApiFetch(path, options = {}) {
       .order('purchase_date', { ascending: false })
       .order('id', { ascending: false });
     if (error) throw new Error(error.message);
-    const purchases = (data || []).map((p) => ({
-      ...p,
-      material_code: p.raw_materials?.code,
-      material_name: p.raw_materials?.name,
-      material_name_ar: p.raw_materials?.name_ar,
-      material_category: p.raw_materials?.category,
-      base_unit: p.raw_materials?.base_unit,
-      purchase_unit: p.raw_materials?.purchase_unit,
-      supplier_name: p.suppliers?.name,
-      supplier_name_ar: p.suppliers?.name_ar,
-    }));
+    const purchases = (data || []).map((p) => {
+      const tot = Number(p.total_landed_cost || 0);
+      const paid = p.amount_paid !== undefined && p.amount_paid !== null ? Number(p.amount_paid) : tot;
+      return {
+        ...p,
+        payment_type: p.payment_type || 'cash',
+        amount_paid: paid,
+        remaining_due: Number(Math.max(0, tot - paid).toFixed(2)),
+        material_code: p.raw_materials?.code,
+        material_name: p.raw_materials?.name,
+        material_name_ar: p.raw_materials?.name_ar,
+        material_category: p.raw_materials?.category,
+        base_unit: p.raw_materials?.base_unit,
+        purchase_unit: p.raw_materials?.purchase_unit,
+        supplier_name: p.suppliers?.name,
+        supplier_name_ar: p.suppliers?.name_ar,
+      };
+    });
     return { purchases };
   }
   if (pathname === '/api/purchases' && method === 'POST') {
@@ -254,6 +347,9 @@ async function supabaseApiFetch(path, options = {}) {
       p_harvest_lot: body.harvest_lot || '',
       p_payment_status: body.payment_status || 'paid',
       p_notes: body.notes || '',
+      p_payment_type: body.payment_type === 'credit' ? 'credit' : 'cash',
+      p_amount_paid: body.payment_type === 'credit' ? Number(body.amount_paid || 0) : null,
+      p_due_date: body.due_date || null,
     });
     if (error) throw new Error(error.message);
     return { purchase: data };

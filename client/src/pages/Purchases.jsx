@@ -31,7 +31,9 @@ export default function Purchases({ lang }) {
     unit_price: '',
     hidden_cost: '0',
     harvest_lot: '',
-    payment_status: 'paid',
+    payment_type: 'cash',
+    amount_paid: '0',
+    due_date: '',
     notes: '',
   });
 
@@ -65,6 +67,8 @@ export default function Purchases({ lang }) {
     category: 'oil',
     phone: '',
     city: '',
+    default_payment_type: 'cash',
+    credit_days: '0',
     notes: '',
   });
 
@@ -93,21 +97,44 @@ export default function Purchases({ lang }) {
     loadAll();
   }, []);
 
+  function calcDueDate(baseDate, days) {
+    if (!days || Number(days) <= 0) return '';
+    const d = new Date(baseDate || new Date().toISOString().slice(0, 10));
+    d.setDate(d.getDate() + Number(days));
+    return d.toISOString().slice(0, 10);
+  }
+
   function openPurchaseFor(mat = null) {
     const selected = mat || materials[0];
+    const defaultSup = suppliers[0];
+    const today = new Date().toISOString().slice(0, 10);
+    const defaultPayType = defaultSup?.default_payment_type === 'credit' ? 'credit' : 'cash';
     setPForm({
-      purchase_date: new Date().toISOString().slice(0, 10),
+      purchase_date: today,
       raw_material_id: selected ? String(selected.id) : '',
-      supplier_id: suppliers[0] ? String(suppliers[0].id) : '',
+      supplier_id: defaultSup ? String(defaultSup.id) : '',
       purchase_qty: selected?.category === 'oil' ? '5' : '100',
       units_per_purchase: selected ? String(Number(selected.units_per_purchase) || 1) : '1',
       unit_price: selected?.category === 'oil' ? '5100' : '',
       hidden_cost: '0',
       harvest_lot: '',
-      payment_status: 'paid',
+      payment_type: defaultPayType,
+      amount_paid: '0',
+      due_date: defaultPayType === 'credit' ? calcDueDate(today, defaultSup?.credit_days || 30) : '',
       notes: '',
     });
     setShowPurchaseModal(true);
+  }
+
+  function onSelectPurchaseSupplier(supId) {
+    const sup = suppliers.find((s) => String(s.id) === String(supId));
+    const payType = sup?.default_payment_type === 'credit' ? 'credit' : 'cash';
+    setPForm((prev) => ({
+      ...prev,
+      supplier_id: supId,
+      payment_type: payType,
+      due_date: payType === 'credit' ? calcDueDate(prev.purchase_date, sup?.credit_days || 30) : '',
+    }));
   }
 
   function onSelectPurchaseMaterial(matId) {
@@ -126,6 +153,10 @@ export default function Purchases({ lang }) {
   const previewSubtotal = previewQty * (Number(pForm.unit_price) || 0);
   const previewLanded = previewSubtotal + (Number(pForm.hidden_cost) || 0);
   const previewPerBase = previewBaseAdded > 0 ? previewLanded / previewBaseAdded : 0;
+  const previewRemainingDue =
+    pForm.payment_type === 'credit'
+      ? Math.max(0, previewLanded - (Number(pForm.amount_paid) || 0))
+      : 0;
 
   async function submitPurchase(e) {
     e.preventDefault();
@@ -142,6 +173,9 @@ export default function Purchases({ lang }) {
           units_per_purchase: Number(pForm.units_per_purchase),
           unit_price: Number(pForm.unit_price),
           hidden_cost: Number(pForm.hidden_cost) || 0,
+          payment_type: pForm.payment_type,
+          amount_paid: pForm.payment_type === 'credit' ? Number(pForm.amount_paid || 0) : previewLanded,
+          due_date: pForm.payment_type === 'credit' && pForm.due_date ? pForm.due_date : null,
         },
       });
       setShowPurchaseModal(false);
@@ -374,38 +408,61 @@ export default function Purchases({ lang }) {
                   <th>{t(lang, 'supplier')}</th>
                   <th>{t(lang, 'purchaseQty')}</th>
                   <th>{t(lang, 'totalBaseAdded')}</th>
-                  <th>{t(lang, 'attachedHiddenCost')}</th>
                   <th>{t(lang, 'totalLanded')}</th>
+                  <th>{t(lang, 'paymentType')}</th>
                   <th>{t(lang, 'landedPerUnit')}</th>
                 </tr>
               </thead>
               <tbody>
-                {purchases.map((p) => (
-                  <tr key={p.id}>
-                    <td>
-                      <div className="cell-main">{p.reference_no}</div>
-                      <div className="cell-sub">{String(p.purchase_date).slice(0, 10)}</div>
-                    </td>
-                    <td>
-                      <div className="cell-main">{pickName(p, lang, 'material_name')}</div>
-                      {p.harvest_lot && <div className="cell-sub">{p.harvest_lot}</div>}
-                    </td>
-                    <td>{pickName(p, lang, 'supplier_name') || '—'}</td>
-                    <td className="num">
-                      {formatNum(p.purchase_qty, 2)} × {formatEGP(p.unit_price, lang)}
-                    </td>
-                    <td className="num cell-main">
-                      {formatNum(p.base_qty, 1)} {p.base_unit === 'litre' ? t(lang, 'litres') : t(lang, 'pcs')}
-                    </td>
-                    <td className="num">{formatEGP(p.hidden_cost, lang)}</td>
-                    <td className="num cell-main">{formatEGP(p.total_landed_cost, lang)}</td>
-                    <td className="num">
-                      <span className="badge badge-olive">
-                        {formatEGP(p.landed_cost_per_base_unit, lang)} / {p.base_unit === 'litre' ? t(lang, 'litres') : t(lang, 'pcs')}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
+                {purchases.map((p) => {
+                  const isCredit = p.payment_type === 'credit';
+                  const rem = Number(p.remaining_due || 0);
+                  return (
+                    <tr key={p.id}>
+                      <td>
+                        <div className="cell-main">{p.reference_no}</div>
+                        <div className="cell-sub">{String(p.purchase_date).slice(0, 10)}</div>
+                      </td>
+                      <td>
+                        <div className="cell-main">{pickName(p, lang, 'material_name')}</div>
+                        {p.harvest_lot && <div className="cell-sub">{p.harvest_lot}</div>}
+                      </td>
+                      <td>{pickName(p, lang, 'supplier_name') || '—'}</td>
+                      <td className="num">
+                        {formatNum(p.purchase_qty, 2)} × {formatEGP(p.unit_price, lang)}
+                      </td>
+                      <td className="num cell-main">
+                        {formatNum(p.base_qty, 1)} {p.base_unit === 'litre' ? t(lang, 'litres') : t(lang, 'pcs')}
+                      </td>
+                      <td className="num">
+                        <div className="cell-main">{formatEGP(p.total_landed_cost, lang)}</div>
+                        {Number(p.hidden_cost) > 0 && (
+                          <div className="cell-sub">+{formatEGP(p.hidden_cost, lang)}</div>
+                        )}
+                      </td>
+                      <td>
+                        <span className={`badge ${!isCredit ? 'badge-emerald' : rem > 0 ? 'badge-clay' : 'badge-gold'}`}>
+                          {t(lang, `payType_${p.payment_type || 'cash'}`)}
+                        </span>
+                        {isCredit && rem > 0 && (
+                          <div className="cell-sub num" style={{ color: 'var(--clay-danger)' }}>
+                            {t(lang, 'remainingDue')}: {formatEGP(rem, lang)}
+                          </div>
+                        )}
+                        {isCredit && p.due_date && rem > 0 && (
+                          <div className="cell-sub num">
+                            {t(lang, 'dueDate')}: {String(p.due_date).slice(0, 10)}
+                          </div>
+                        )}
+                      </td>
+                      <td className="num">
+                        <span className="badge badge-olive">
+                          {formatEGP(p.landed_cost_per_base_unit, lang)} / {p.base_unit === 'litre' ? t(lang, 'litres') : t(lang, 'pcs')}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -487,19 +544,27 @@ export default function Purchases({ lang }) {
                   <tr>
                     <th>{t(lang, 'supplier')}</th>
                     <th>{t(lang, 'category')}</th>
+                    <th>{t(lang, 'defaultPaymentType')}</th>
+                    <th>{t(lang, 'remainingDue')}</th>
                     <th>{t(lang, 'customerPhone')}</th>
                     <th>{t(lang, 'city')}</th>
-                    <th>{t(lang, 'notes')}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {suppliers.map((s) => (
                     <tr key={s.id}>
                       <td className="cell-main">{pickName(s, lang)}</td>
-                      <td><span className="badge badge-olive">{s.category}</span></td>
+                      <td><span className="badge badge-olive">{t(lang, `supCat_${s.category}`)}</span></td>
+                      <td>
+                        <span className={`badge ${s.default_payment_type === 'credit' ? 'badge-gold' : 'badge-emerald'}`}>
+                          {t(lang, `payType_${s.default_payment_type || 'cash'}`)}
+                        </span>
+                      </td>
+                      <td className={`num ${Number(s.balance_due) > 0 ? 'val-negative' : 'val-positive'}`}>
+                        {formatEGP(s.balance_due || 0, lang)}
+                      </td>
                       <td className="num">{s.phone || '—'}</td>
                       <td>{s.city || '—'}</td>
-                      <td className="cell-sub">{s.notes || '—'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -540,12 +605,12 @@ export default function Purchases({ lang }) {
               <select
                 className="select"
                 value={pForm.supplier_id}
-                onChange={(e) => setPForm({ ...pForm, supplier_id: e.target.value })}
+                onChange={(e) => onSelectPurchaseSupplier(e.target.value)}
               >
                 <option value="">—</option>
                 {suppliers.map((s) => (
                   <option key={s.id} value={s.id}>
-                    {pickName(s, lang)}
+                    {pickName(s, lang)} ({t(lang, `payType_${s.default_payment_type || 'cash'}`)})
                   </option>
                 ))}
               </select>
@@ -616,6 +681,55 @@ export default function Purchases({ lang }) {
             </div>
 
             <div className="form-field">
+              <label className="form-label">{t(lang, 'paymentType')}</label>
+              <select
+                className="select"
+                value={pForm.payment_type}
+                onChange={(e) => {
+                  const nextType = e.target.value;
+                  const sup = suppliers.find((s) => String(s.id) === String(pForm.supplier_id));
+                  setPForm({
+                    ...pForm,
+                    payment_type: nextType,
+                    amount_paid: nextType === 'credit' ? '0' : String(previewLanded),
+                    due_date:
+                      nextType === 'credit'
+                        ? pForm.due_date || calcDueDate(pForm.purchase_date, sup?.credit_days || 30)
+                        : '',
+                  });
+                }}
+              >
+                <option value="cash">{t(lang, 'payType_cash')}</option>
+                <option value="credit">{t(lang, 'payType_credit')}</option>
+              </select>
+            </div>
+
+            {pForm.payment_type === 'credit' && (
+              <>
+                <div className="form-field">
+                  <label className="form-label">{t(lang, 'amountPaidNow')}</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    className="input"
+                    value={pForm.amount_paid}
+                    onChange={(e) => setPForm({ ...pForm, amount_paid: e.target.value })}
+                  />
+                </div>
+                <div className="form-field">
+                  <label className="form-label">{t(lang, 'dueDate')}</label>
+                  <input
+                    type="date"
+                    className="input"
+                    value={pForm.due_date}
+                    onChange={(e) => setPForm({ ...pForm, due_date: e.target.value })}
+                  />
+                </div>
+              </>
+            )}
+
+            <div className="form-field">
               <label className="form-label">{t(lang, 'harvestLot')}</label>
               <input
                 type="text"
@@ -655,9 +769,16 @@ export default function Purchases({ lang }) {
                 <div className="mini-metric-val num">{formatEGP(previewLanded, lang)}</div>
               </div>
               <div>
-                <div className="mini-metric-label">{t(lang, 'landedPerUnit')}</div>
-                <div className="mini-metric-val num" style={{ color: 'var(--olive-text)' }}>
-                  {formatEGP(previewPerBase, lang)}
+                <div className="mini-metric-label">
+                  {pForm.payment_type === 'credit' ? t(lang, 'remainingDue') : t(lang, 'landedPerUnit')}
+                </div>
+                <div
+                  className="mini-metric-val num"
+                  style={{ color: pForm.payment_type === 'credit' ? 'var(--clay-danger)' : 'var(--olive-text)' }}
+                >
+                  {pForm.payment_type === 'credit'
+                    ? formatEGP(previewRemainingDue, lang)
+                    : formatEGP(previewPerBase, lang)}
                 </div>
               </div>
             </div>

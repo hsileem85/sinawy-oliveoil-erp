@@ -191,3 +191,76 @@ test('Dashboard summary returns complete P&L and marketing metrics', async () =>
   assert.equal(data.channels.length, 3);
   assert.ok(data.inventory.total_oil_litres > 0);
 });
+
+test('Suppliers & Credit (آجل): Credit purchase tracks balance due and settlement clears it', async () => {
+  // 1. Create a credit supplier
+  const sRes = await fetch(`${baseUrl}/api/purchases/suppliers`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      name: 'Sinai Farms Credit Mill',
+      name_ar: 'معصرة مزارع سيناء',
+      category: 'oil',
+      default_payment_type: 'credit',
+      credit_days: 30,
+    }),
+  });
+  assert.equal(sRes.status, 201);
+  const { supplier } = await sRes.json();
+  assert.equal(supplier.default_payment_type, 'credit');
+
+  // 2. Record a Credit (آجل) purchase with partial down payment (total = 10,000, paid = 3,000, due = 7,000)
+  const matRes = await fetch(`${baseUrl}/api/purchases/materials`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const evoo = (await matRes.json()).materials.find((m) => m.code === 'OIL-EVOO');
+
+  const pRes = await fetch(`${baseUrl}/api/purchases`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      raw_material_id: evoo.id,
+      supplier_id: supplier.id,
+      purchase_qty: 2,
+      units_per_purchase: 17,
+      unit_price: 5000,
+      hidden_cost: 0,
+      payment_type: 'credit',
+      amount_paid: 3000,
+      due_date: '2026-12-20',
+    }),
+  });
+  assert.equal(pRes.status, 201);
+  const { purchase } = await pRes.json();
+  assert.equal(purchase.payment_type, 'credit');
+  assert.equal(Number(purchase.amount_paid), 3000);
+  assert.equal(purchase.payment_status, 'partial');
+
+  // 3. Check supplier balance_due == 7,000
+  const listRes = await fetch(`${baseUrl}/api/purchases/suppliers`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const supAfterPo = (await listRes.json()).suppliers.find((s) => s.id === supplier.id);
+  assert.equal(Number(supAfterPo.balance_due), 7000);
+
+  // 4. Record settlement payment of 7,000 EGP
+  const payRes = await fetch(`${baseUrl}/api/purchases/supplier-payments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({
+      supplier_id: supplier.id,
+      amount: 7000,
+      payment_method: 'cash',
+      notes: 'Full آجل settlement',
+    }),
+  });
+  assert.equal(payRes.status, 201);
+
+  // 5. Verify supplier balance_due is now 0
+  const listRes2 = await fetch(`${baseUrl}/api/purchases/suppliers`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const supAfterPay = (await listRes2.json()).suppliers.find((s) => s.id === supplier.id);
+  assert.equal(Number(supAfterPay.balance_due), 0);
+});
+

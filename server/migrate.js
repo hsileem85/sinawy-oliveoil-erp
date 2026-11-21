@@ -8,9 +8,15 @@ import { execSql, query, getDbMode } from './db.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export async function runMigrations() {
-  const migrationPath = path.join(__dirname, 'migrations', '001_init.sql');
-  const sql = fs.readFileSync(migrationPath, 'utf8');
-  await execSql(sql);
+  const migrationsDir = path.join(__dirname, 'migrations');
+  const files = fs
+    .readdirSync(migrationsDir)
+    .filter((f) => f.endsWith('.sql'))
+    .sort();
+  for (const file of files) {
+    const sql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+    await execSql(sql);
+  }
 
   // Ensure default admin account exists
   const adminEmail = (process.env.ADMIN_EMAIL || 'admin@sinawy.net').toLowerCase();

@@ -148,7 +148,12 @@ export default function Sales({ lang }) {
           discount: pDisc,
           shipping_charged: pShipCharged,
           shipping_actual_cost: pShipActual,
-          payment_status: oForm.payment_method === 'cod' ? 'cod_pending' : 'paid',
+          payment_status:
+            oForm.payment_method === 'cod'
+              ? 'cod_pending'
+              : oForm.payment_method === 'credit'
+                ? 'unpaid'
+                : 'paid',
           items: oForm.items.map((li) => ({
             finished_product_id: Number(li.finished_product_id),
             quantity: Number(li.quantity),
@@ -499,7 +504,7 @@ export default function Sales({ lang }) {
                 value={oForm.payment_method}
                 onChange={(e) => setOForm({ ...oForm, payment_method: e.target.value })}
               >
-                {['cod', 'instapay', 'vodafone_cash', 'card', 'bank_transfer', 'cash'].map((pm) => (
+                {['cod', 'cash', 'credit', 'instapay', 'vodafone_cash', 'card', 'bank_transfer'].map((pm) => (
                   <option key={pm} value={pm}>{t(lang, `pay_${pm}`)}</option>
                 ))}
               </select>

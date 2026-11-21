@@ -9,12 +9,14 @@ import {
   Plug,
   ShoppingBag,
   ShoppingCart,
+  Users,
 } from 'lucide-react';
 import { clearAuthSession, getStoredUser, getToken, restoreSession } from './api.js';
 import { getSupabaseClient, isSupabaseMode } from './supabase.js';
 import { t } from './i18n.js';
 import Login from './pages/Login.jsx';
 import Dashboard from './pages/Dashboard.jsx';
+import Suppliers from './pages/Suppliers.jsx';
 import Purchases from './pages/Purchases.jsx';
 import Bottling from './pages/Bottling.jsx';
 import Sales from './pages/Sales.jsx';
@@ -81,6 +83,7 @@ export default function App() {
 
   const navItems = [
     { id: 'dashboard', label: t(lang, 'navOverview'), icon: LayoutDashboard },
+    { id: 'suppliers', label: t(lang, 'navSuppliers'), icon: Users },
     { id: 'purchases', label: t(lang, 'navPurchases'), icon: ShoppingCart },
     { id: 'bottling', label: t(lang, 'navBottling'), icon: Factory },
     { id: 'sales', label: t(lang, 'navSales'), icon: ShoppingBag },
@@ -169,6 +172,7 @@ export default function App() {
 
         <main className="page-content">
           {page === 'dashboard' && <Dashboard lang={lang} onNavigate={setPage} />}
+          {page === 'suppliers' && <Suppliers lang={lang} />}
           {page === 'purchases' && <Purchases lang={lang} />}
           {page === 'bottling' && <Bottling lang={lang} />}
           {page === 'sales' && <Sales lang={lang} />}
