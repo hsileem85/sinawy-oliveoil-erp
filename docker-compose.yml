@@ -1,0 +1,36 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sinawy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sinawy_secure_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-sinawy_erp}
+    volumes:
+      - sinawy_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sinawy} -d ${POSTGRES_DB:-sinawy_erp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  erp:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${PORT:-4000}:4000"
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgres://${POSTGRES_USER:-sinawy}:${POSTGRES_PASSWORD:-sinawy_secure_pass}@postgres:5432/${POSTGRES_DB:-sinawy_erp}
+      JWT_SECRET: ${JWT_SECRET:-change-this-secret-in-production}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@sinawy.net}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-sinawy2026}
+      ERP_API_KEY: ${ERP_API_KEY:-snw_live_change_me_to_secure_key}
+      EASYORDERS_WEBHOOK_SECRET: ${EASYORDERS_WEBHOOK_SECRET:-snw_eo_secret_change_me}
+
+volumes:
+  sinawy_pgdata:

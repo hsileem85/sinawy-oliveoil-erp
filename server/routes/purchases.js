@@ -1,0 +1,336 @@
+import express from 'express';
+import { query, withTransaction } from '../db.js';
+
+const router = express.Router();
+
+function genRef(prefix) {
+  const now = new Date();
+  const ym = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const rnd = String(Math.floor(1000 + Math.random() * 9000));
+  return `${prefix}-${ym}-${rnd}`;
+}
+
+/* ==================== SUPPLIERS ==================== */
+router.get('/suppliers', async (_req, res) => {
+  const result = await query('SELECT * FROM suppliers ORDER BY name ASC');
+  res.json({ suppliers: result.rows });
+});
+
+router.post('/suppliers', async (req, res) => {
+  try {
+    const { name, name_ar, category = 'general', phone = '', city = '', notes = '' } = req.body || {};
+    if (!name?.trim()) return res.status(400).json({ error: 'Supplier name is required' });
+    const result = await query(
+      `INSERT INTO suppliers (name, name_ar, category, phone, city, notes)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [name.trim(), name_ar?.trim() || name.trim(), category, phone, city, notes]
+    );
+    res.status(201).json({ supplier: result.rows[0] });
+  } catch (err) {
+    console.error('Create supplier error:', err);
+    res.status(500).json({ error: 'Failed to create supplier' });
+  }
+});
+
+/* ==================== RAW MATERIALS ==================== */
+router.get('/materials', async (_req, res) => {
+  const result = await query(
+    `SELECT *,
+      CASE WHEN category = 'oil' AND units_per_purchase > 0
+           THEN ROUND(stock_qty / units_per_purchase, 2)
+           ELSE NULL END AS equivalent_gallons
+     FROM raw_materials
+     ORDER BY
+       CASE category WHEN 'oil' THEN 1 WHEN 'container' THEN 2 WHEN 'sticker' THEN 3 ELSE 4 END,
+       name ASC`
+  );
+  res.json({ materials: result.rows });
+});
+
+router.post('/materials', async (req, res) => {
+  try {
+    const {
+      code,
+      name,
+      name_ar,
+      category,
+      container_material = 'none',
+      capacity_ml = null,
+      base_unit,
+      purchase_unit,
+      units_per_purchase,
+      min_stock = 0,
+      notes = '',
+    } = req.body || {};
+
+    if (!code?.trim() || !name?.trim() || !category) {
+      return res.status(400).json({ error: 'Code, name, and category are required' });
+    }
+
+    const isOil = category === 'oil';
+    const resolvedBaseUnit = base_unit || (isOil ? 'litre' : 'pcs');
+    const resolvedPurchaseUnit = purchase_unit || (isOil ? 'gallon_17l' : 'pcs');
+    const resolvedUnitsPerPurchase = Number(units_per_purchase) || (isOil ? 17 : 1);
+
+    const result = await query(
+      `INSERT INTO raw_materials
+        (code, name, name_ar, category, container_material, capacity_ml, base_unit, purchase_unit, units_per_purchase, min_stock, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING *`,
+      [
+        code.trim().toUpperCase(),
+        name.trim(),
+        name_ar?.trim() || name.trim(),
+        category,
+        category === 'container' ? container_material : 'none',
+        capacity_ml ? Number(capacity_ml) : null,
+        resolvedBaseUnit,
+        resolvedPurchaseUnit,
+        resolvedUnitsPerPurchase,
+        Number(min_stock) || 0,
+        notes,
+      ]
+    );
+    res.status(201).json({ material: result.rows[0] });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'A raw material with this code already exists' });
+    }
+    console.error('Create raw material error:', err);
+    res.status(500).json({ error: 'Failed to create raw material' });
+  }
+});
+
+router.patch('/materials/:id', async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { name, name_ar, min_stock, notes } = req.body || {};
+    const result = await query(
+      `UPDATE raw_materials
+       SET name = COALESCE($1, name),
+           name_ar = COALESCE($2, name_ar),
+           min_stock = COALESCE($3, min_stock),
+           notes = COALESCE($4, notes),
+           updated_at = NOW()
+       WHERE id = $5 RETURNING *`,
+      [name || null, name_ar || null, min_stock !== undefined ? Number(min_stock) : null, notes ?? null, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Material not found' });
+    res.json({ material: result.rows[0] });
+  } catch (err) {
+    console.error('Update material error:', err);
+    res.status(500).json({ error: 'Failed to update material' });
+  }
+});
+
+/* ==================== PURCHASES ==================== */
+router.get('/', async (req, res) => {
+  const category = req.query.category;
+  const params = [];
+  let where = '';
+  if (category && category !== 'all') {
+    params.push(category);
+    where = 'WHERE rm.category = $1';
+  }
+  const result = await query(
+    `SELECT p.*,
+            rm.code AS material_code,
+            rm.name AS material_name,
+            rm.name_ar AS material_name_ar,
+            rm.category AS material_category,
+            rm.base_unit,
+            rm.purchase_unit,
+            s.name AS supplier_name,
+            s.name_ar AS supplier_name_ar
+     FROM purchases p
+     JOIN raw_materials rm ON rm.id = p.raw_material_id
+     LEFT JOIN suppliers s ON s.id = p.supplier_id
+     ${where}
+     ORDER BY p.purchase_date DESC, p.id DESC`,
+    params
+  );
+  res.json({ purchases: result.rows });
+});
+
+router.post('/', async (req, res) => {
+  try {
+    const {
+      purchase_date,
+      supplier_id = null,
+      raw_material_id,
+      purchase_qty,
+      units_per_purchase,
+      unit_price,
+      hidden_cost = 0,
+      harvest_lot = '',
+      payment_status = 'paid',
+      notes = '',
+    } = req.body || {};
+
+    const qty = Number(purchase_qty);
+    const price = Number(unit_price);
+    const extraCost = Number(hidden_cost) || 0;
+
+    if (!raw_material_id || !(qty > 0) || !(price >= 0) || extraCost < 0) {
+      return res.status(400).json({ error: 'Valid material, quantity (>0), and unit price are required' });
+    }
+
+    const created = await withTransaction(async (tx) => {
+      const matRes = await tx.query('SELECT * FROM raw_materials WHERE id = $1', [
+        Number(raw_material_id),
+      ]);
+      if (matRes.rows.length === 0) {
+        const e = new Error('Raw material not found');
+        e.status = 404;
+        throw e;
+      }
+      const mat = matRes.rows[0];
+      const factor = Number(units_per_purchase) > 0 ? Number(units_per_purchase) : Number(mat.units_per_purchase) || 1;
+      const baseQty = Number((qty * factor).toFixed(3));
+      const subtotal = Number((qty * price).toFixed(2));
+      const totalLandedCost = Number((subtotal + extraCost).toFixed(2));
+      const landedPerBase = Number((totalLandedCost / baseQty).toFixed(4));
+      const refNo = genRef('PO');
+
+      const pRes = await tx.query(
+        `INSERT INTO purchases
+          (reference_no, purchase_date, supplier_id, raw_material_id, purchase_qty, units_per_purchase,
+           base_qty, unit_price, subtotal, hidden_cost, total_landed_cost, landed_cost_per_base_unit,
+           harvest_lot, payment_status, notes)
+         VALUES ($1, COALESCE($2::date, CURRENT_DATE), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         RETURNING *`,
+        [
+          refNo,
+          purchase_date || null,
+          supplier_id ? Number(supplier_id) : null,
+          Number(raw_material_id),
+          qty,
+          factor,
+          baseQty,
+          price,
+          subtotal,
+          extraCost,
+          totalLandedCost,
+          landedPerBase,
+          harvest_lot,
+          payment_status,
+          notes,
+        ]
+      );
+
+      // Weighted Average Cost update on raw_materials
+      const curQty = Number(mat.stock_qty) || 0;
+      const curAvg = Number(mat.avg_unit_cost) || 0;
+      const newQty = Number((curQty + baseQty).toFixed(3));
+      const newAvg =
+        newQty > 0
+          ? Number(((curQty * curAvg + totalLandedCost) / newQty).toFixed(4))
+          : landedPerBase;
+
+      await tx.query(
+        `UPDATE raw_materials
+         SET stock_qty = $1, avg_unit_cost = $2, updated_at = NOW()
+         WHERE id = $3`,
+        [newQty, newAvg, mat.id]
+      );
+
+      // Stock movement audit log
+      await tx.query(
+        `INSERT INTO stock_movements (item_type, item_id, movement_type, qty_delta, unit_cost, reference_no, notes)
+         VALUES ('raw', $1, 'purchase', $2, $3, $4, $5)`,
+        [
+          mat.id,
+          baseQty,
+          landedPerBase,
+          refNo,
+          `Purchased ${qty} ${mat.purchase_unit} (${baseQty} ${mat.base_unit})`,
+        ]
+      );
+
+      // Mirror attached purchase hidden cost in hidden_costs table marked as scope='purchase' (so it's visible in cost breakdown without double-counting in P&L!)
+      if (extraCost > 0) {
+        await tx.query(
+          `INSERT INTO hidden_costs (cost_date, category, title, title_ar, amount, allocation_scope, related_ref, notes)
+           VALUES (COALESCE($1::date, CURRENT_DATE), 'shipping_inbound', $2, $3, $4, 'purchase', $5, $6)`,
+          [
+            purchase_date || null,
+            `Purchase landed hidden cost (${mat.name})`,
+            `تكلفة خفية للمشتريات (${mat.name_ar || mat.name})`,
+            extraCost,
+            refNo,
+            notes || 'Absorbed into raw material landed unit cost',
+          ]
+        );
+      }
+
+      return pRes.rows[0];
+    });
+
+    res.status(201).json({ purchase: created });
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    console.error('Create purchase error:', err);
+    res.status(500).json({ error: 'Failed to record purchase' });
+  }
+});
+
+/* ==================== HIDDEN COSTS ==================== */
+router.get('/hidden-costs', async (_req, res) => {
+  const result = await query(
+    'SELECT * FROM hidden_costs ORDER BY cost_date DESC, id DESC'
+  );
+  res.json({ hidden_costs: result.rows });
+});
+
+router.post('/hidden-costs', async (req, res) => {
+  try {
+    const {
+      cost_date,
+      category = 'other',
+      title,
+      title_ar,
+      amount,
+      allocation_scope = 'overhead',
+      related_ref = '',
+      notes = '',
+    } = req.body || {};
+
+    if (!title?.trim() || !(Number(amount) > 0)) {
+      return res.status(400).json({ error: 'Title and positive amount are required' });
+    }
+
+    const result = await query(
+      `INSERT INTO hidden_costs (cost_date, category, title, title_ar, amount, allocation_scope, related_ref, notes)
+       VALUES (COALESCE($1::date, CURRENT_DATE), $2, $3, $4, $5, $6, $7, $8)
+       RETURNING *`,
+      [
+        cost_date || null,
+        category,
+        title.trim(),
+        title_ar?.trim() || title.trim(),
+        Number(amount),
+        allocation_scope,
+        related_ref,
+        notes,
+      ]
+    );
+    res.status(201).json({ hidden_cost: result.rows[0] });
+  } catch (err) {
+    console.error('Create hidden cost error:', err);
+    res.status(500).json({ error: 'Failed to record hidden cost' });
+  }
+});
+
+router.delete('/hidden-costs/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const result = await query(
+    "DELETE FROM hidden_costs WHERE id = $1 AND allocation_scope = 'overhead' RETURNING id",
+    [id]
+  );
+  if (result.rows.length === 0) {
+    return res.status(404).json({ error: 'Standalone hidden cost not found' });
+  }
+  res.json({ ok: true });
+});
+
+export default router;

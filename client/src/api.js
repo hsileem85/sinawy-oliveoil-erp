@@ -1,0 +1,618 @@
+import { getSupabaseClient, getSupabaseConfig, isSupabaseMode } from './supabase.js';
+
+const TOKEN_KEY = 'sinawy_erp_token';
+const USER_KEY = 'sinawy_erp_user';
+
+export function getToken() {
+  return localStorage.getItem(TOKEN_KEY) || '';
+}
+
+export function getStoredUser() {
+  try {
+    return JSON.parse(localStorage.getItem(USER_KEY) || 'null');
+  } catch {
+    return null;
+  }
+}
+
+export function setAuthSession(token, user) {
+  localStorage.setItem(TOKEN_KEY, token);
+  localStorage.setItem(USER_KEY, JSON.stringify(user));
+}
+
+export function clearAuthSession() {
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(USER_KEY);
+  if (isSupabaseMode()) {
+    const sb = getSupabaseClient();
+    sb?.auth.signOut().catch(() => {});
+  }
+}
+
+export async function restoreSession() {
+  if (isSupabaseMode()) {
+    const sb = getSupabaseClient();
+    const { data } = await sb.auth.getSession();
+    if (data?.session?.user) {
+      const u = data.session.user;
+      const userObj = {
+        id: u.id,
+        email: u.email,
+        name: u.user_metadata?.name || u.email?.split('@')[0] || 'Sinawy Admin',
+        role: 'admin',
+      };
+      setAuthSession(data.session.access_token, userObj);
+      return userObj;
+    }
+    return null;
+  }
+  return getToken() ? getStoredUser() : null;
+}
+
+export async function signUpSupabase(email, password, name) {
+  const sb = getSupabaseClient();
+  if (!sb) throw new Error('Supabase is not configured');
+  const { data, error } = await sb.auth.signUp({
+    email,
+    password,
+    options: { data: { name: name || 'Sinawy Admin' } },
+  });
+  if (error) throw new Error(error.message);
+  if (data?.session?.user) {
+    const u = data.session.user;
+    const userObj = { id: u.id, email: u.email, name: name || u.email, role: 'admin' };
+    setAuthSession(data.session.access_token, userObj);
+    return { user: userObj, needsEmailConfirm: false };
+  }
+  return { user: null, needsEmailConfirm: true };
+}
+
+/* ==================== SUPABASE ADAPTER ==================== */
+async function supabaseApiFetch(path, options = {}) {
+  const sb = getSupabaseClient();
+  if (!sb) throw new Error('Supabase is not configured');
+
+  const method = (options.method || 'GET').toUpperCase();
+  const body = options.body && typeof options.body === 'string' ? JSON.parse(options.body) : options.body || {};
+  const [pathname] = path.split('?');
+
+  // Health
+  if (pathname === '/api/health') {
+    const cfg = getSupabaseConfig();
+    return {
+      status: 'ok',
+      service: 'sinawy-oliveoil-erp',
+      db_mode: 'supabase',
+      supabase_url: cfg.url,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  // Auth login
+  if (pathname === '/api/auth/login' && method === 'POST') {
+    const { data, error } = await sb.auth.signInWithPassword({
+      email: String(body.email || '').trim(),
+      password: String(body.password || ''),
+    });
+    if (error) throw new Error(error.message);
+    const u = data.user;
+    const userObj = {
+      id: u.id,
+      email: u.email,
+      name: u.user_metadata?.name || u.email?.split('@')[0] || 'Sinawy Admin',
+      role: 'admin',
+    };
+    return { token: data.session.access_token, user: userObj };
+  }
+
+  // Seed starter demo data
+  if (pathname === '/api/seed-demo' && method === 'POST') {
+    const { data, error } = await sb.rpc('erp_seed_demo_data');
+    if (error) throw new Error(error.message);
+    return data;
+  }
+
+  // API keys
+  if (pathname === '/api/auth/api-keys' && method === 'GET') {
+    const { data, error } = await sb
+      .from('api_keys')
+      .select('id, name, key_value, active, last_used_at, created_at')
+      .order('created_at', { ascending: false });
+    if (error) throw new Error(error.message);
+    return { keys: data || [] };
+  }
+  if (pathname === '/api/auth/api-keys' && method === 'POST') {
+    const rnd = Array.from(crypto.getRandomValues(new Uint8Array(16)))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+    const { data, error } = await sb
+      .from('api_keys')
+      .insert({ name: body.name, key_value: `snw_live_${rnd}`, active: true })
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+    return { key: data };
+  }
+  const keyToggleMatch = pathname.match(/^\/api\/auth\/api-keys\/(\d+)\/toggle$/);
+  if (keyToggleMatch && method === 'PATCH') {
+    const id = Number(keyToggleMatch[1]);
+    const { data: cur, error: e1 } = await sb.from('api_keys').select('active').eq('id', id).single();
+    if (e1) throw new Error(e1.message);
+    const { data, error } = await sb
+      .from('api_keys')
+      .update({ active: !cur.active })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+    return { key: data };
+  }
+
+  // Dashboard Summary
+  if (pathname === '/api/dashboard/summary' && method === 'GET') {
+    const { data, error } = await sb.rpc('erp_get_dashboard_summary');
+    if (error) throw new Error(error.message);
+    return data;
+  }
+
+  // Phase 1: Suppliers
+  if (pathname === '/api/purchases/suppliers' && method === 'GET') {
+    const { data, error } = await sb.from('suppliers').select('*').order('name', { ascending: true });
+    if (error) throw new Error(error.message);
+    return { suppliers: data || [] };
+  }
+  if (pathname === '/api/purchases/suppliers' && method === 'POST') {
+    const { data, error } = await sb
+      .from('suppliers')
+      .insert({
+        name: body.name?.trim(),
+        name_ar: body.name_ar?.trim() || body.name?.trim(),
+        category: body.category || 'general',
+        phone: body.phone || '',
+        city: body.city || '',
+        notes: body.notes || '',
+      })
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+    return { supplier: data };
+  }
+
+  // Phase 1: Raw Materials
+  if (pathname === '/api/purchases/materials' && method === 'GET') {
+    const { data, error } = await sb.from('raw_materials').select('*').order('name', { ascending: true });
+    if (error) throw new Error(error.message);
+    const order = { oil: 1, container: 2, sticker: 3, packaging: 4 };
+    const materials = (data || [])
+      .map((m) => ({
+        ...m,
+        equivalent_gallons:
+          m.category === 'oil' && Number(m.units_per_purchase) > 0
+            ? Number((Number(m.stock_qty) / Number(m.units_per_purchase)).toFixed(2))
+            : null,
+      }))
+      .sort((a, b) => (order[a.category] || 9) - (order[b.category] || 9) || a.name.localeCompare(b.name));
+    return { materials };
+  }
+  if (pathname === '/api/purchases/materials' && method === 'POST') {
+    const isOil = body.category === 'oil';
+    const { data, error } = await sb
+      .from('raw_materials')
+      .insert({
+        code: String(body.code || '').trim().toUpperCase(),
+        name: String(body.name || '').trim(),
+        name_ar: String(body.name_ar || body.name || '').trim(),
+        category: body.category,
+        container_material: body.category === 'container' ? body.container_material || 'glass' : 'none',
+        capacity_ml: body.capacity_ml ? Number(body.capacity_ml) : null,
+        base_unit: body.base_unit || (isOil ? 'litre' : 'pcs'),
+        purchase_unit: body.purchase_unit || (isOil ? 'gallon_17l' : 'pcs'),
+        units_per_purchase: Number(body.units_per_purchase) || (isOil ? 17 : 1),
+        min_stock: Number(body.min_stock) || 0,
+        notes: body.notes || '',
+      })
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+    return { material: data };
+  }
+
+  // Phase 1: Purchases
+  if (pathname === '/api/purchases' && method === 'GET') {
+    const { data, error } = await sb
+      .from('purchases')
+      .select(`
+        *,
+        raw_materials ( code, name, name_ar, category, base_unit, purchase_unit ),
+        suppliers ( name, name_ar )
+      `)
+      .order('purchase_date', { ascending: false })
+      .order('id', { ascending: false });
+    if (error) throw new Error(error.message);
+    const purchases = (data || []).map((p) => ({
+      ...p,
+      material_code: p.raw_materials?.code,
+      material_name: p.raw_materials?.name,
+      material_name_ar: p.raw_materials?.name_ar,
+      material_category: p.raw_materials?.category,
+      base_unit: p.raw_materials?.base_unit,
+      purchase_unit: p.raw_materials?.purchase_unit,
+      supplier_name: p.suppliers?.name,
+      supplier_name_ar: p.suppliers?.name_ar,
+    }));
+    return { purchases };
+  }
+  if (pathname === '/api/purchases' && method === 'POST') {
+    const { data, error } = await sb.rpc('erp_record_purchase', {
+      p_raw_material_id: Number(body.raw_material_id),
+      p_purchase_qty: Number(body.purchase_qty),
+      p_unit_price: Number(body.unit_price),
+      p_units_per_purchase: Number(body.units_per_purchase) || null,
+      p_hidden_cost: Number(body.hidden_cost) || 0,
+      p_supplier_id: body.supplier_id ? Number(body.supplier_id) : null,
+      p_purchase_date: body.purchase_date || null,
+      p_harvest_lot: body.harvest_lot || '',
+      p_payment_status: body.payment_status || 'paid',
+      p_notes: body.notes || '',
+    });
+    if (error) throw new Error(error.message);
+    return { purchase: data };
+  }
+
+  // Phase 1: Hidden Costs
+  if (pathname === '/api/purchases/hidden-costs' && method === 'GET') {
+    const { data, error } = await sb
+      .from('hidden_costs')
+      .select('*')
+      .order('cost_date', { ascending: false })
+      .order('id', { ascending: false });
+    if (error) throw new Error(error.message);
+    return { hidden_costs: data || [] };
+  }
+  if (pathname === '/api/purchases/hidden-costs' && method === 'POST') {
+    const { data, error } = await sb
+      .from('hidden_costs')
+      .insert({
+        cost_date: body.cost_date || new Date().toISOString().slice(0, 10),
+        category: body.category || 'other',
+        title: String(body.title || '').trim(),
+        title_ar: String(body.title_ar || body.title || '').trim(),
+        amount: Number(body.amount),
+        allocation_scope: body.allocation_scope || 'overhead',
+        related_ref: body.related_ref || '',
+        notes: body.notes || '',
+      })
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+    return { hidden_cost: data };
+  }
+  const hcDelMatch = pathname.match(/^\/api\/purchases\/hidden-costs\/(\d+)$/);
+  if (hcDelMatch && method === 'DELETE') {
+    const { error } = await sb
+      .from('hidden_costs')
+      .delete()
+      .eq('id', Number(hcDelMatch[1]))
+      .eq('allocation_scope', 'overhead');
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  }
+
+  // Phase 2: Finished Products & Live Yield
+  if (pathname === '/api/bottling/products' && method === 'GET') {
+    const [{ data: fps, error: e1 }, { data: rms, error: e2 }] = await Promise.all([
+      sb.from('finished_products').select('*').order('size_ml', { ascending: true }).order('name', { ascending: true }),
+      sb.from('raw_materials').select('*'),
+    ]);
+    if (e1) throw new Error(e1.message);
+    if (e2) throw new Error(e2.message);
+    const byId = Object.fromEntries((rms || []).map((m) => [m.id, m]));
+
+    const products = (fps || []).map((p) => {
+      const oil = byId[p.oil_material_id];
+      const cnt = byId[p.container_material_id];
+      const stk = byId[p.sticker_material_id];
+      const ext = byId[p.extra_material_id];
+
+      const limits = [];
+      if (oil && Number(p.oil_litres_per_unit) > 0) {
+        limits.push({ key: 'oil', max: Math.floor(Number(oil.stock_qty) / Number(p.oil_litres_per_unit)) });
+      }
+      if (cnt && Number(p.containers_per_unit) > 0) {
+        limits.push({ key: 'container', max: Math.floor(Number(cnt.stock_qty) / Number(p.containers_per_unit)) });
+      }
+      if (stk && Number(p.stickers_per_unit) > 0) {
+        limits.push({ key: 'sticker', max: Math.floor(Number(stk.stock_qty) / Number(p.stickers_per_unit)) });
+      }
+      if (ext && Number(p.extra_qty_per_unit) > 0) {
+        limits.push({ key: 'extra', max: Math.floor(Number(ext.stock_qty) / Number(p.extra_qty_per_unit)) });
+      }
+      limits.sort((a, b) => a.max - b.max);
+
+      const estBomCost = Number(
+        (
+          Number(p.oil_litres_per_unit || 0) * Number(oil?.avg_unit_cost || 0) +
+          Number(p.containers_per_unit || 0) * Number(cnt?.avg_unit_cost || 0) +
+          Number(p.stickers_per_unit || 0) * Number(stk?.avg_unit_cost || 0) +
+          Number(p.extra_qty_per_unit || 0) * Number(ext?.avg_unit_cost || 0)
+        ).toFixed(2)
+      );
+
+      return {
+        ...p,
+        oil_name: oil?.name,
+        oil_name_ar: oil?.name_ar,
+        oil_stock_qty: oil?.stock_qty ?? 0,
+        oil_unit_cost: oil?.avg_unit_cost ?? 0,
+        container_name: cnt?.name,
+        container_name_ar: cnt?.name_ar,
+        container_stock_qty: cnt?.stock_qty ?? 0,
+        container_unit_cost: cnt?.avg_unit_cost ?? 0,
+        sticker_name: stk?.name,
+        sticker_name_ar: stk?.name_ar,
+        sticker_stock_qty: stk?.stock_qty ?? 0,
+        sticker_unit_cost: stk?.avg_unit_cost ?? 0,
+        extra_name: ext?.name,
+        extra_name_ar: ext?.name_ar,
+        extra_stock_qty: ext?.stock_qty ?? 0,
+        extra_unit_cost: ext?.avg_unit_cost ?? 0,
+        max_producible: limits.length > 0 ? Math.max(0, limits[0].max) : 0,
+        bottleneck: limits.length > 0 ? limits[0].key : null,
+        estimated_bom_cost: estBomCost,
+      };
+    });
+    return { products };
+  }
+  if (pathname === '/api/bottling/products' && method === 'POST') {
+    const sku = String(body.sku || '').trim().toUpperCase();
+    const { data, error } = await sb
+      .from('finished_products')
+      .insert({
+        sku,
+        external_sku: String(body.external_sku || sku).trim(),
+        name: String(body.name || '').trim(),
+        name_ar: String(body.name_ar || body.name || '').trim(),
+        oil_type: body.oil_type || 'extra_virgin',
+        container_type: body.container_type || 'glass',
+        size_ml: Number(body.size_ml || 500),
+        oil_material_id: body.oil_material_id ? Number(body.oil_material_id) : null,
+        oil_litres_per_unit: Number(body.oil_litres_per_unit) || Number(body.size_ml || 500) / 1000,
+        container_material_id: body.container_material_id ? Number(body.container_material_id) : null,
+        containers_per_unit: Number(body.containers_per_unit || 1),
+        sticker_material_id: body.sticker_material_id ? Number(body.sticker_material_id) : null,
+        stickers_per_unit: Number(body.stickers_per_unit || 1),
+        extra_material_id: body.extra_material_id ? Number(body.extra_material_id) : null,
+        extra_qty_per_unit: Number(body.extra_qty_per_unit || 0),
+        retail_price: Number(body.retail_price || 0),
+        min_stock: Number(body.min_stock || 10),
+      })
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+    return { product: data };
+  }
+
+  // Phase 2: Bottling Batches
+  if (pathname === '/api/bottling/batches' && method === 'GET') {
+    const { data, error } = await sb
+      .from('bottling_batches')
+      .select(`*, finished_products ( sku, name, name_ar, container_type, size_ml, retail_price )`)
+      .order('batch_date', { ascending: false })
+      .order('id', { ascending: false });
+    if (error) throw new Error(error.message);
+    const batches = (data || []).map((b) => ({
+      ...b,
+      sku: b.finished_products?.sku,
+      product_name: b.finished_products?.name,
+      product_name_ar: b.finished_products?.name_ar,
+      container_type: b.finished_products?.container_type,
+      size_ml: b.finished_products?.size_ml,
+      retail_price: b.finished_products?.retail_price,
+    }));
+    return { batches };
+  }
+  if (pathname === '/api/bottling/batches' && method === 'POST') {
+    const { data, error } = await sb.rpc('erp_run_bottling_batch', {
+      p_finished_product_id: Number(body.finished_product_id),
+      p_quantity_produced: Number(body.quantity_produced),
+      p_spillage_litres: Number(body.spillage_litres || 0),
+      p_batch_hidden_cost: Number(body.batch_hidden_cost || 0),
+      p_batch_date: body.batch_date || null,
+      p_harvest_note: body.harvest_note || '',
+      p_notes: body.notes || '',
+    });
+    if (error) throw new Error(error.message);
+    return { batch: data };
+  }
+
+  // Phase 3: Sales Orders
+  if (pathname === '/api/sales/orders' && method === 'GET') {
+    const { data, error } = await sb
+      .from('sales_orders')
+      .select(`*, sales_order_items ( * )`)
+      .order('order_date', { ascending: false })
+      .order('id', { ascending: false });
+    if (error) throw new Error(error.message);
+    const orders = (data || []).map((o) => ({
+      ...o,
+      items: o.sales_order_items || [],
+    }));
+    return { orders };
+  }
+  if (pathname === '/api/sales/orders' && method === 'POST') {
+    const { data, error } = await sb.rpc('erp_create_sales_order', { p_payload: body });
+    if (error) throw new Error(error.message);
+    return data;
+  }
+  const orderPatchMatch = pathname.match(/^\/api\/sales\/orders\/(\d+)$/);
+  if (orderPatchMatch && method === 'PATCH') {
+    const { data, error } = await sb.rpc('erp_update_order_status', {
+      p_order_id: Number(orderPatchMatch[1]),
+      p_order_status: body.order_status || null,
+      p_payment_status: body.payment_status || null,
+      p_shipping_actual_cost: body.shipping_actual_cost !== undefined ? Number(body.shipping_actual_cost) : null,
+      p_notes: body.notes ?? null,
+    });
+    if (error) throw new Error(error.message);
+    return { order: data };
+  }
+
+  // Phase 3: Ad Spend
+  if (pathname === '/api/sales/ad-spend' && method === 'GET') {
+    const { data, error } = await sb
+      .from('ad_spend')
+      .select('*')
+      .order('spend_date', { ascending: false })
+      .order('id', { ascending: false });
+    if (error) throw new Error(error.message);
+    return { ad_spend: data || [] };
+  }
+  if (pathname === '/api/sales/ad-spend' && method === 'POST') {
+    const { data, error } = await sb
+      .from('ad_spend')
+      .insert({
+        spend_date: body.spend_date || new Date().toISOString().slice(0, 10),
+        platform: body.platform || 'facebook',
+        campaign_name: String(body.campaign_name || '').trim(),
+        amount: Number(body.amount),
+        notes: body.notes || '',
+      })
+      .select()
+      .single();
+    if (error) throw new Error(error.message);
+    return { entry: data };
+  }
+  const adDelMatch = pathname.match(/^\/api\/sales\/ad-spend\/(\d+)$/);
+  if (adDelMatch && method === 'DELETE') {
+    const { error } = await sb.from('ad_spend').delete().eq('id', Number(adDelMatch[1]));
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  }
+
+  // Integrations: Simulate EasyOrders Order
+  if (pathname === '/api/integrations/easyorders/simulate' && method === 'POST') {
+    const { data: fps, error: e1 } = await sb
+      .from('finished_products')
+      .select('id, sku, external_sku, retail_price')
+      .eq('active', true)
+      .gt('stock_qty', 0)
+      .order('id', { ascending: true })
+      .limit(1);
+    if (e1) throw new Error(e1.message);
+    if (!fps || fps.length === 0) {
+      throw new Error('No finished products in stock to simulate an order');
+    }
+    const fp = fps[0];
+    const simId = `EO-SIM-${Math.floor(100000 + Math.random() * 900000)}`;
+    const { data, error } = await sb.rpc('erp_create_sales_order', {
+      p_payload: {
+        external_order_id: simId,
+        channel: 'online_store',
+        social_platform: 'none',
+        campaign_name: 'sinawy.net (EasyOrders Test)',
+        customer_name: 'Tarek El-Masry / طارق المصري',
+        customer_phone: '01092837465',
+        city: 'Cairo - New Cairo',
+        address: '5th Settlement, District 3',
+        payment_method: 'cod',
+        payment_status: 'cod_pending',
+        order_status: 'pending',
+        shipping_charged: 65,
+        shipping_actual_cost: 55,
+        notes: 'Simulated EasyOrders webhook order',
+        items: [{ finished_product_id: fp.id, quantity: 1, unit_price: Number(fp.retail_price) }],
+      },
+    });
+    if (error) throw new Error(error.message);
+    return { ok: true, order: data.order };
+  }
+
+  throw new Error(`Unsupported Supabase route: ${method} ${pathname}`);
+}
+
+/* ==================== UNIFIED API FETCH ==================== */
+export async function apiFetch(path, options = {}) {
+  if (isSupabaseMode()) {
+    return supabaseApiFetch(path, options);
+  }
+
+  const token = getToken();
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(options.headers || {}),
+  };
+
+  const res = await fetch(path, {
+    ...options,
+    headers,
+    body: options.body && typeof options.body !== 'string' ? JSON.stringify(options.body) : options.body,
+  });
+
+  if (res.status === 401 && path !== '/api/auth/login') {
+    clearAuthSession();
+    window.dispatchEvent(new Event('sinawy-auth-expired'));
+  }
+
+  const text = await res.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = { raw: text };
+  }
+
+  if (!res.ok) {
+    throw new Error(data.error || `Request failed (${res.status})`);
+  }
+
+  return data;
+}
+
+export async function downloadCsv(path, filename) {
+  if (isSupabaseMode()) {
+    const { orders } = await supabaseApiFetch('/api/sales/orders', { method: 'GET' });
+    const headers = [
+      'Order No', 'Date', 'Channel', 'Platform', 'Campaign', 'Customer', 'Phone', 'City',
+      'Status', 'Payment', 'Subtotal (EGP)', 'Discount (EGP)', 'Shipping Charged',
+      'Shipping Actual', 'Total (EGP)', 'COGS (EGP)', 'Net Profit (EGP)',
+    ];
+    const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const lines = [headers.join(',')];
+    for (const o of orders) {
+      lines.push(
+        [
+          o.order_no, String(o.order_date).slice(0, 10), o.channel, o.social_platform,
+          o.campaign_name, o.customer_name, o.customer_phone, o.city, o.order_status,
+          o.payment_method, o.subtotal, o.discount, o.shipping_charged, o.shipping_actual_cost,
+          o.total_amount, o.total_cogs, o.net_profit,
+        ].map(esc).join(',')
+      );
+    }
+    const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    return;
+  }
+
+  const token = getToken();
+  const res = await fetch(path, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) throw new Error('Export failed');
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
