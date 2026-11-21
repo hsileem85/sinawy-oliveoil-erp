@@ -54,7 +54,42 @@ export default function Dashboard({ lang, onNavigate }) {
   }
 
   if (error) {
-    return <div className="alert-banner error">{error}</div>;
+    const missingSchema = error.includes('erp_get_dashboard_summary');
+    return (
+      <div className="card">
+        <div className="card-body">
+          <div className="alert-banner error">{error}</div>
+          {missingSchema && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 14 }}>
+              <strong>
+                {lang === 'ar'
+                  ? 'الخطوة الأخيرة: إنشاء جداول قاعدة البيانات في Supabase'
+                  : 'One last step: Initialize your Supabase database tables'}
+              </strong>
+              <p style={{ margin: 0, color: 'var(--text-secondary)' }}>
+                {lang === 'ar'
+                  ? 'تم ربط حسابك بنجاح! الآن افتح Supabase -> SQL Editor -> New Query، الصق محتوى ملف الترحيل واضغط Run، ثم اضغط تحديث هنا.'
+                  : 'Your Supabase login is connected! Open Supabase -> SQL Editor -> New Query, paste the migration SQL file and click Run, then click Refresh below.'}
+              </p>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                <a
+                  href="https://raw.githubusercontent.com/hsileem85/sinawy-oliveoil-erp/main/supabase/migrations/20261121000001_sinawy_erp.sql"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="btn btn-primary btn-sm"
+                >
+                  {lang === 'ar' ? 'فتح ملف SQL للنسخ' : 'Open Migration SQL File'}
+                </a>
+                <button type="button" className="btn btn-secondary btn-sm" onClick={load}>
+                  <RefreshCw size={14} />
+                  {t(lang, 'refresh')}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
   }
 
   const { pnl, orders_kpi, channels, marketing, inventory, low_stock_alerts, recent_batches, recent_orders } = data;

@@ -980,3 +980,30 @@ BEGIN
   RETURN jsonb_build_object('seeded', true, 'message', 'Seeded Sinawy Olive Oil ERP starter data');
 END;
 $$;
+
+-- 10. EXPLICIT GRANTS & POSTGREST SCHEMA CACHE RELOAD
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+    GRANT USAGE ON SCHEMA public TO authenticated;
+    GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO authenticated;
+    GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO authenticated;
+    GRANT EXECUTE ON FUNCTION public.erp_gen_ref(TEXT) TO authenticated;
+    GRANT EXECUTE ON FUNCTION public.erp_record_purchase(INTEGER, NUMERIC, NUMERIC, NUMERIC, NUMERIC, INTEGER, DATE, TEXT, TEXT, TEXT) TO authenticated;
+    GRANT EXECUTE ON FUNCTION public.erp_run_bottling_batch(INTEGER, INTEGER, NUMERIC, NUMERIC, DATE, TEXT, TEXT) TO authenticated;
+    GRANT EXECUTE ON FUNCTION public.erp_create_sales_order(JSONB) TO authenticated;
+    GRANT EXECUTE ON FUNCTION public.erp_update_order_status(INTEGER, TEXT, TEXT, NUMERIC, TEXT) TO authenticated;
+    GRANT EXECUTE ON FUNCTION public.erp_get_dashboard_summary() TO authenticated;
+    GRANT EXECUTE ON FUNCTION public.erp_seed_demo_data() TO authenticated;
+  END IF;
+
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role') THEN
+    GRANT USAGE ON SCHEMA public TO service_role;
+    GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
+    GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
+    GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role;
+  END IF;
+END $$;
+
+NOTIFY pgrst, 'reload schema';
+
