@@ -44,6 +44,7 @@ export function isSupabaseMode() {
 export function isStaticHost() {
   return (
     window.location.hostname.endsWith('github.io') ||
+    window.location.hostname.endsWith('sinawy.net') ||
     import.meta.env.VITE_HOST_MODE === 'static'
   );
 }
