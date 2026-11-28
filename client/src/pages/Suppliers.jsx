@@ -2,7 +2,10 @@ import React, { useEffect, useState } from 'react';
 import {
   Banknote,
   Clock,
+  Download,
   Edit3,
+  FileText,
+  Lock,
   Plus,
   Receipt,
   RotateCcw,
@@ -35,10 +38,21 @@ export default function Suppliers({ lang }) {
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
+  // Payment Ledger filters
+  const [txTypeFilter, setTxTypeFilter] = useState('all');
+  const [ledgerSupFilter, setLedgerSupFilter] = useState('all');
+
+  // Supplier Statement state
+  const [statementSupplierId, setStatementSupplierId] = useState('');
+  const [statementData, setStatementData] = useState(null);
+  const [statementLoading, setStatementLoading] = useState(false);
+
+  // Supplier Create/Edit modal
   const [showSupModal, setShowSupModal] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [sForm, setSForm] = useState(EMPTY_SUPPLIER);
 
+  // Record Payment modal
   const [showPayModal, setShowPayModal] = useState(false);
   const [payForm, setPayForm] = useState({
     supplier_id: '',
@@ -50,6 +64,10 @@ export default function Suppliers({ lang }) {
     notes: '',
   });
 
+  // Reverse Payment modal
+  const [reversingPayment, setReversingPayment] = useState(null);
+  const [reverseReason, setReverseReason] = useState('');
+
   async function loadAll() {
     setLoading(true);
     setError('');
@@ -59,9 +77,18 @@ export default function Suppliers({ lang }) {
         apiFetch('/api/purchases'),
         apiFetch('/api/purchases/supplier-payments').catch(() => ({ payments: [] })),
       ]);
-      setSuppliers(sRes.suppliers || []);
+      const nextSuppliers = sRes.suppliers || [];
+      setSuppliers(nextSuppliers);
       setPurchases(pRes.purchases || []);
       setPayments(payRes.payments || []);
+
+      if (!statementSupplierId && nextSuppliers.length > 0) {
+        const preferred =
+          nextSuppliers.find((s) => Number(s.balance_due) > 0) ||
+          nextSuppliers.find((s) => Number(s.total_purchased) > 0) ||
+          nextSuppliers[0];
+        if (preferred) setStatementSupplierId(String(preferred.id));
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -69,9 +96,37 @@ export default function Suppliers({ lang }) {
     }
   }
 
+  async function loadStatement(supId) {
+    if (!supId) {
+      setStatementData(null);
+      return;
+    }
+    setStatementLoading(true);
+    setError('');
+    try {
+      const data = await apiFetch(`/api/purchases/suppliers/${supId}/statement`);
+      setStatementData(data);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setStatementLoading(false);
+    }
+  }
+
   useEffect(() => {
     loadAll();
   }, []);
+
+  useEffect(() => {
+    if (tab === 'statement' && statementSupplierId) {
+      loadStatement(statementSupplierId);
+    }
+  }, [tab, statementSupplierId]);
+
+  function openSupplierStatement(sup) {
+    setStatementSupplierId(String(sup.id));
+    setTab('statement');
+  }
 
   function openNewSupplier() {
     setEditingId(null);
@@ -111,6 +166,11 @@ export default function Suppliers({ lang }) {
       notes: '',
     });
     setShowPayModal(true);
+  }
+
+  function openReverseModal(pm) {
+    setReversingPayment(pm);
+    setReverseReason('');
   }
 
   async function submitSupplier(e) {
@@ -171,6 +231,9 @@ export default function Suppliers({ lang }) {
       });
       setShowPayModal(false);
       await loadAll();
+      if (tab === 'statement' && statementSupplierId) {
+        await loadStatement(statementSupplierId);
+      }
     } catch (err) {
       setError(err.message);
     } finally {
@@ -178,17 +241,77 @@ export default function Suppliers({ lang }) {
     }
   }
 
-  async function cancelPayment(paymentId) {
-    if (!window.confirm(t(lang, 'confirmCancelPayment'))) return;
+  async function confirmReversePayment(e) {
+    e.preventDefault();
+    if (!reversingPayment) return;
+    setSaving(true);
     setError('');
     try {
-      await apiFetch(`/api/purchases/supplier-payments/${paymentId}`, {
-        method: 'DELETE',
+      await apiFetch(`/api/purchases/supplier-payments/${reversingPayment.id}/reverse`, {
+        method: 'POST',
+        body: { notes: reverseReason.trim() },
       });
+      setReversingPayment(null);
+      setReverseReason('');
       await loadAll();
+      if (tab === 'statement' && statementSupplierId) {
+        await loadStatement(statementSupplierId);
+      }
     } catch (err) {
       setError(err.message);
+    } finally {
+      setSaving(false);
     }
+  }
+
+  function exportStatementCsv() {
+    if (!statementData?.supplier) return;
+    const sup = statementData.supplier;
+    const entries = statementData.entries || [];
+    const headers = [
+      'Date',
+      'Reference',
+      'Type',
+      'Description',
+      'Method',
+      'Debit (Charges EGP)',
+      'Credit (Paid EGP)',
+      'Running Balance (EGP)',
+      'Status',
+      'Notes',
+    ];
+    const esc = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const lines = [headers.join(',')];
+    for (const row of entries) {
+      lines.push(
+        [
+          String(row.entry_date).slice(0, 10),
+          row.reference_no,
+          t(lang, `txType_${row.entry_type}`),
+          pickName(row, lang, 'description'),
+          row.entry_type === 'purchase'
+            ? t(lang, `payType_${row.payment_method || 'cash'}`)
+            : t(lang, `pay_${row.payment_method || 'cash'}`),
+          Number(row.debit_amount || 0).toFixed(2),
+          Number(row.credit_amount || 0).toFixed(2),
+          Number(row.running_balance || 0).toFixed(2),
+          row.is_reversed ? `${t(lang, 'txReversed')} (${row.reversal_ref || ''})` : '',
+          row.notes || '',
+        ]
+          .map(esc)
+          .join(',')
+      );
+    }
+    const blob = new Blob(['\uFEFF' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const safeName = String(sup.name || `supplier-${sup.id}`).replace(/[^a-z0-9-_]+/gi, '_');
+    a.download = `statement_${safeName}_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   }
 
   const totalPurchased = suppliers.reduce((acc, s) => acc + Number(s.total_purchased || 0), 0);
@@ -198,6 +321,29 @@ export default function Suppliers({ lang }) {
   const supplierOpenInvoices = openCreditPurchases.filter(
     (p) => String(p.supplier_id) === String(payForm.supplier_id)
   );
+
+  const filteredPayments = payments.filter((pm) => {
+    const txType = pm.transaction_type || 'payment';
+    if (txTypeFilter !== 'all' && txType !== txTypeFilter) return false;
+    if (ledgerSupFilter !== 'all' && String(pm.supplier_id) !== String(ledgerSupFilter)) return false;
+    return true;
+  });
+
+  function renderTxBadge(txType) {
+    if (txType === 'reversal') {
+      return <span className="badge badge-clay">{t(lang, 'txType_reversal')}</span>;
+    }
+    if (txType === 'down_payment') {
+      return <span className="badge badge-gold">{t(lang, 'txType_down_payment')}</span>;
+    }
+    if (txType === 'purchase') {
+      return <span className="badge badge-slate">{t(lang, 'txType_purchase')}</span>;
+    }
+    return <span className="badge badge-emerald">{t(lang, 'txType_payment')}</span>;
+  }
+
+  const stmtSup = statementData?.supplier;
+  const stmtEntries = statementData?.entries || [];
 
   return (
     <div>
@@ -235,7 +381,7 @@ export default function Suppliers({ lang }) {
           tone="gold"
         />
         <StatCard
-          label={t(lang, 'totalPaid')}
+          label={t(lang, 'netPayments')}
           value={formatEGP(totalPaid, lang)}
           icon={Wallet}
           tone="emerald"
@@ -269,7 +415,14 @@ export default function Suppliers({ lang }) {
           className={`tab-btn ${tab === 'payments' ? 'active' : ''}`}
           onClick={() => setTab('payments')}
         >
-          {t(lang, 'tabPaymentHistory')} ({payments.length})
+          {t(lang, 'tabPaymentLedger')} ({payments.length})
+        </button>
+        <button
+          type="button"
+          className={`tab-btn ${tab === 'statement' ? 'active' : ''}`}
+          onClick={() => setTab('statement')}
+        >
+          {t(lang, 'tabSupplierStatement')}
         </button>
       </div>
 
@@ -284,7 +437,7 @@ export default function Suppliers({ lang }) {
                   <th>{t(lang, 'category')}</th>
                   <th>{t(lang, 'defaultPaymentType')}</th>
                   <th>{t(lang, 'totalPurchased')}</th>
-                  <th>{t(lang, 'totalPaid')}</th>
+                  <th>{t(lang, 'netPayments')}</th>
                   <th>{t(lang, 'remainingDue')}</th>
                   <th>{t(lang, 'actions')}</th>
                 </tr>
@@ -297,6 +450,7 @@ export default function Suppliers({ lang }) {
                 ) : (
                   suppliers.map((s) => {
                     const due = Number(s.balance_due || 0);
+                    const adv = Number(s.advance_balance || 0);
                     const isCredit = s.default_payment_type === 'credit';
                     return (
                       <tr key={s.id}>
@@ -323,9 +477,22 @@ export default function Suppliers({ lang }) {
                           <span className={due > 0 ? 'val-negative' : 'val-positive'}>
                             {formatEGP(due, lang)}
                           </span>
+                          {adv > 0.01 && (
+                            <div className="cell-sub val-positive">
+                              {t(lang, 'advanceCredit')}: {formatEGP(adv, lang)}
+                            </div>
+                          )}
                         </td>
                         <td>
                           <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                            <button
+                              type="button"
+                              className="btn btn-secondary btn-sm"
+                              onClick={() => openSupplierStatement(s)}
+                            >
+                              <FileText size={13} />
+                              {t(lang, 'viewStatement')}
+                            </button>
                             {due > 0 && (
                               <button
                                 type="button"
@@ -396,7 +563,12 @@ export default function Suppliers({ lang }) {
                         <td className="cell-main">{pickName(p, lang, 'supplier_name') || '—'}</td>
                         <td>{pickName(p, lang, 'material_name')}</td>
                         <td className="num">{formatEGP(p.total_landed_cost, lang)}</td>
-                        <td className="num">{formatEGP(p.amount_paid, lang)}</td>
+                        <td className="num">
+                          <div>{formatEGP(p.amount_paid, lang)}</div>
+                          <span className={`badge ${p.payment_status === 'partial' ? 'badge-gold' : 'badge-clay'}`}>
+                            {t(lang, `payStatus_${p.payment_status || 'unpaid'}`)}
+                          </span>
+                        </td>
                         <td className="num val-negative">{formatEGP(p.remaining_due, lang)}</td>
                         <td className="num">{p.due_date ? String(p.due_date).slice(0, 10) : '—'}</td>
                         <td>
@@ -421,53 +593,318 @@ export default function Suppliers({ lang }) {
         </div>
       )}
 
-      {/* TAB 3: SUPPLIER PAYMENT SETTLEMENTS */}
+      {/* TAB 3: IMMUTABLE PAYMENT LEDGER TRANSACTIONS */}
       {tab === 'payments' && (
-        <div className="card">
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>{t(lang, 'date')}</th>
-                  <th>{t(lang, 'supplier')}</th>
-                  <th>{t(lang, 'paymentStatus')}</th>
-                  <th>{t(lang, 'egp')}</th>
-                  <th>{t(lang, 'notes')}</th>
-                  <th>{t(lang, 'actions')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {payments.length === 0 ? (
-                  <tr><td colSpan="6">{t(lang, 'noData')}</td></tr>
-                ) : (
-                  payments.map((pm) => (
-                    <tr key={pm.id}>
-                      <td>
-                        <div className="cell-main">{pm.reference_no || `#${pm.id}`}</div>
-                        <div className="cell-sub">{String(pm.payment_date).slice(0, 10)}</div>
-                      </td>
-                      <td className="cell-main">{pickName(pm, lang, 'supplier_name')}</td>
-                      <td>
-                        <span className="badge badge-olive">{t(lang, `pay_${pm.payment_method}`)}</span>
-                        {pm.purchase_ref && <div className="cell-sub">{pm.purchase_ref}</div>}
-                      </td>
-                      <td className="num val-positive">{formatEGP(pm.amount, lang)}</td>
-                      <td className="cell-sub">{pm.notes || '—'}</td>
-                      <td>
-                        <button
-                          type="button"
-                          className="btn btn-danger-ghost btn-sm"
-                          onClick={() => cancelPayment(pm.id)}
-                        >
-                          <RotateCcw size={13} />
-                          {t(lang, 'cancelPayment')}
-                        </button>
-                      </td>
-                    </tr>
-                  ))
+        <div>
+          <div className="ledger-note-bar">
+            <Lock size={14} />
+            <span>{t(lang, 'ledgerImmutableNote')}</span>
+          </div>
+
+          <div className="ledger-toolbar">
+            <div className="filter-pills" style={{ marginBottom: 0 }}>
+              {['all', 'payment', 'down_payment', 'reversal'].map((ft) => (
+                <button
+                  key={ft}
+                  type="button"
+                  className={`pill-btn ${txTypeFilter === ft ? 'active' : ''}`}
+                  onClick={() => setTxTypeFilter(ft)}
+                >
+                  {ft === 'all' ? t(lang, 'all') : t(lang, `txType_${ft}`)}
+                </button>
+              ))}
+            </div>
+
+            <select
+              className="select ledger-sup-select"
+              value={ledgerSupFilter}
+              onChange={(e) => setLedgerSupFilter(e.target.value)}
+            >
+              <option value="all">{t(lang, 'allSuppliers')}</option>
+              {suppliers.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {pickName(s, lang)}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="card">
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>{t(lang, 'date')}</th>
+                    <th>{t(lang, 'supplier')}</th>
+                    <th>{t(lang, 'stmtType')}</th>
+                    <th>{t(lang, 'paymentMethod')}</th>
+                    <th>{t(lang, 'egp')}</th>
+                    <th>{t(lang, 'notes')}</th>
+                    <th>{t(lang, 'actions')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredPayments.length === 0 ? (
+                    <tr><td colSpan="7">{t(lang, 'noData')}</td></tr>
+                  ) : (
+                    filteredPayments.map((pm) => {
+                      const txType = pm.transaction_type || 'payment';
+                      const isReversal = txType === 'reversal';
+                      const isReversed = Boolean(pm.is_reversed);
+                      const amt = Number(pm.amount || 0);
+                      return (
+                        <tr key={pm.id} className={isReversed ? 'row-reversed' : isReversal ? 'row-reversal' : ''}>
+                          <td>
+                            <div className="cell-main">{pm.reference_no || `#${pm.id}`}</div>
+                            <div className="cell-sub">{String(pm.payment_date).slice(0, 10)}</div>
+                          </td>
+                          <td className="cell-main">{pickName(pm, lang, 'supplier_name')}</td>
+                          <td>
+                            {renderTxBadge(txType)}
+                            {isReversal && (pm.reversed_ref || pm.reversed_payment_id) && (
+                              <div className="cell-sub">
+                                {t(lang, 'reversedOf')}: {pm.reversed_ref || `#${pm.reversed_payment_id}`}
+                              </div>
+                            )}
+                            {isReversed && (
+                              <div className="cell-sub">
+                                <span className="badge badge-neutral" style={{ marginTop: 4 }}>
+                                  {t(lang, 'txReversed')}
+                                  {pm.reversal_ref ? ` · ${pm.reversal_ref}` : ''}
+                                </span>
+                              </div>
+                            )}
+                          </td>
+                          <td>
+                            <span className="badge badge-olive">{t(lang, `pay_${pm.payment_method || 'cash'}`)}</span>
+                            {pm.purchase_ref && <div className="cell-sub">{pm.purchase_ref}</div>}
+                          </td>
+                          <td className="num">
+                            <span
+                              className={
+                                isReversal
+                                  ? 'val-negative'
+                                  : isReversed
+                                    ? 'val-reversed'
+                                    : 'val-positive'
+                              }
+                            >
+                              {isReversal ? '−' : '+'}
+                              {formatEGP(amt, lang)}
+                            </span>
+                          </td>
+                          <td className="cell-sub">{pm.notes || '—'}</td>
+                          <td>
+                            {isReversal ? (
+                              <span className="badge badge-neutral">{t(lang, 'txReversalEntry')}</span>
+                            ) : isReversed ? (
+                              <span className="badge badge-neutral">{t(lang, 'txReversed')}</span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="btn btn-danger-ghost btn-sm"
+                                onClick={() => openReverseModal(pm)}
+                              >
+                                <RotateCcw size={13} />
+                                {t(lang, 'cancelPayment')}
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 4: SUPPLIER STATEMENT (كشف حساب مورد بالرصيد التراكمي) */}
+      {tab === 'statement' && (
+        <div>
+          <div className="statement-controls card">
+            <div className="statement-controls-row">
+              <div className="form-field" style={{ minWidth: 240, flex: 1 }}>
+                <label className="form-label">{t(lang, 'selectSupplierForStatement')}</label>
+                <select
+                  className="select"
+                  value={statementSupplierId}
+                  onChange={(e) => setStatementSupplierId(e.target.value)}
+                >
+                  <option value="">—</option>
+                  {suppliers.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {pickName(s, lang)} — {t(lang, 'remainingDue')}: {formatEGP(s.balance_due, lang)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="header-actions" style={{ alignSelf: 'flex-end' }}>
+                {stmtSup && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={exportStatementCsv}
+                      disabled={stmtEntries.length === 0}
+                    >
+                      <Download size={15} />
+                      {t(lang, 'exportStatementCsv')}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-primary"
+                      onClick={() => openPayModal(stmtSup)}
+                    >
+                      <Banknote size={15} />
+                      {t(lang, 'btnRecordPayment')}
+                    </button>
+                  </>
                 )}
-              </tbody>
-            </table>
+              </div>
+            </div>
+
+            {stmtSup && (
+              <div className="statement-summary-grid">
+                <div className="statement-summary-item">
+                  <div className="mini-metric-label">{t(lang, 'totalPurchased')}</div>
+                  <div className="mini-metric-val num">{formatEGP(stmtSup.total_purchased, lang)}</div>
+                </div>
+                <div className="statement-summary-item">
+                  <div className="mini-metric-label">{t(lang, 'netPayments')}</div>
+                  <div className="mini-metric-val num val-positive">{formatEGP(stmtSup.total_paid, lang)}</div>
+                </div>
+                <div className="statement-summary-item">
+                  <div className="mini-metric-label">
+                    {Number(stmtSup.advance_balance || 0) > 0.01
+                      ? t(lang, 'advanceCredit')
+                      : t(lang, 'remainingDue')}
+                  </div>
+                  <div
+                    className={`mini-metric-val num ${
+                      Number(stmtSup.balance_due || 0) > 0.01 ? 'val-negative' : 'val-positive'
+                    }`}
+                  >
+                    {Number(stmtSup.advance_balance || 0) > 0.01
+                      ? formatEGP(stmtSup.advance_balance, lang)
+                      : formatEGP(stmtSup.balance_due, lang)}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="card" style={{ marginTop: 16 }}>
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>{t(lang, 'date')}</th>
+                    <th>{t(lang, 'stmtType')}</th>
+                    <th>{t(lang, 'stmtDescription')}</th>
+                    <th>{t(lang, 'stmtDebit')}</th>
+                    <th>{t(lang, 'stmtCredit')}</th>
+                    <th>{t(lang, 'stmtRunningBalance')}</th>
+                    <th>{t(lang, 'actions')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {statementLoading ? (
+                    <tr><td colSpan="7">{t(lang, 'loading')}</td></tr>
+                  ) : !statementSupplierId || stmtEntries.length === 0 ? (
+                    <tr><td colSpan="7">{t(lang, 'noData')}</td></tr>
+                  ) : (
+                    stmtEntries.map((row) => {
+                      const isPayEntry = row.entry_type === 'payment' || row.entry_type === 'down_payment';
+                      const isRev = row.entry_type === 'reversal';
+                      const isReversed = Boolean(row.is_reversed);
+                      const debit = Number(row.debit_amount || 0);
+                      const credit = Number(row.credit_amount || 0);
+                      const running = Number(row.running_balance || 0);
+                      return (
+                        <tr
+                          key={`${row.entry_type}-${row.source_id}`}
+                          className={isReversed ? 'row-reversed' : isRev ? 'row-reversal' : ''}
+                        >
+                          <td>
+                            <div className="cell-main">{row.reference_no}</div>
+                            <div className="cell-sub">{String(row.entry_date).slice(0, 10)}</div>
+                          </td>
+                          <td>
+                            {renderTxBadge(row.entry_type)}
+                            {isReversed && (
+                              <div className="cell-sub">
+                                <span className="badge badge-neutral" style={{ marginTop: 4 }}>
+                                  {t(lang, 'txReversed')}
+                                </span>
+                              </div>
+                            )}
+                          </td>
+                          <td>
+                            <div className="cell-main">{pickName(row, lang, 'description')}</div>
+                            <div className="cell-sub">
+                              {row.entry_type === 'purchase'
+                                ? t(lang, `payType_${row.payment_method || 'cash'}`)
+                                : t(lang, `pay_${row.payment_method || 'cash'}`)}
+                              {row.notes ? ` · ${row.notes}` : ''}
+                            </div>
+                          </td>
+                          <td className="num">
+                            {debit > 0 ? (
+                              <span className={isRev ? 'val-negative' : ''}>{formatEGP(debit, lang)}</span>
+                            ) : (
+                              '—'
+                            )}
+                          </td>
+                          <td className="num">
+                            {credit > 0 ? (
+                              <span className={isReversed ? 'val-reversed' : 'val-positive'}>
+                                {formatEGP(credit, lang)}
+                              </span>
+                            ) : (
+                              '—'
+                            )}
+                          </td>
+                          <td className="num cell-main">
+                            <span className={running > 0.01 ? 'val-negative' : 'val-positive'}>
+                              {formatEGP(running, lang)}
+                            </span>
+                          </td>
+                          <td>
+                            {isPayEntry && !isReversed ? (
+                              <button
+                                type="button"
+                                className="btn btn-danger-ghost btn-sm"
+                                onClick={() =>
+                                  openReverseModal({
+                                    id: row.source_id,
+                                    reference_no: row.reference_no,
+                                    payment_date: row.entry_date,
+                                    amount: credit,
+                                    supplier_name: stmtSup?.name,
+                                    supplier_name_ar: stmtSup?.name_ar,
+                                  })
+                                }
+                              >
+                                <RotateCcw size={13} />
+                                {t(lang, 'cancelPayment')}
+                              </button>
+                            ) : isReversed ? (
+                              <span className="cell-sub">{row.reversal_ref || t(lang, 'txReversed')}</span>
+                            ) : (
+                              <span className="cell-sub">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
@@ -591,7 +1028,7 @@ export default function Suppliers({ lang }) {
         </form>
       </Modal>
 
-      {/* MODAL: RECORD SUPPLIER PAYMENT (SETTLE آجل) */}
+      {/* MODAL: RECORD SUPPLIER PAYMENT (APPEND IMMUTABLE LEDGER TRANSACTION) */}
       <Modal
         open={showPayModal}
         title={t(lang, 'btnRecordPayment')}
@@ -664,7 +1101,7 @@ export default function Suppliers({ lang }) {
             </div>
 
             <div className="form-field">
-              <label className="form-label">{t(lang, 'paymentStatus')}</label>
+              <label className="form-label">{t(lang, 'paymentMethod')}</label>
               <select
                 className="select"
                 value={payForm.payment_method}
@@ -708,6 +1145,72 @@ export default function Suppliers({ lang }) {
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* MODAL: APPEND REVERSAL TRANSACTION (NO DELETE / NO EDIT OF ORIGINAL RECORD) */}
+      <Modal
+        open={Boolean(reversingPayment)}
+        title={t(lang, 'reversePaymentTitle')}
+        onClose={() => setReversingPayment(null)}
+      >
+        {reversingPayment && (
+          <form onSubmit={confirmReversePayment}>
+            <div className="preview-box" style={{ marginBottom: 14 }}>
+              <div className="preview-box-title">
+                <RotateCcw size={15} />
+                {reversingPayment.reference_no || `#${reversingPayment.id}`}
+              </div>
+              <p className="cell-sub" style={{ margin: '6px 0 10px' }}>
+                {t(lang, 'reversePaymentDesc')}
+              </p>
+              <div className="preview-grid">
+                <div>
+                  <div className="mini-metric-label">{t(lang, 'supplier')}</div>
+                  <div className="mini-metric-val">
+                    {pickName(reversingPayment, lang, 'supplier_name')}
+                  </div>
+                </div>
+                <div>
+                  <div className="mini-metric-label">{t(lang, 'date')}</div>
+                  <div className="mini-metric-val num">
+                    {String(reversingPayment.payment_date).slice(0, 10)}
+                  </div>
+                </div>
+                <div>
+                  <div className="mini-metric-label">{t(lang, 'egp')}</div>
+                  <div className="mini-metric-val num val-negative">
+                    −{formatEGP(reversingPayment.amount, lang)}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="form-field full">
+              <label className="form-label">{t(lang, 'reversalReason')}</label>
+              <input
+                type="text"
+                className="input"
+                placeholder={t(lang, 'reversalReasonPlaceholder')}
+                value={reverseReason}
+                onChange={(e) => setReverseReason(e.target.value)}
+              />
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 18 }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setReversingPayment(null)}
+              >
+                {t(lang, 'cancel')}
+              </button>
+              <button type="submit" className="btn btn-danger" disabled={saving}>
+                <RotateCcw size={15} />
+                {t(lang, 'confirmReverse')}
+              </button>
+            </div>
+          </form>
+        )}
       </Modal>
     </div>
   );

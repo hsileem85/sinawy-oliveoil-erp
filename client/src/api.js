@@ -155,8 +155,26 @@ async function supabaseApiFetch(path, options = {}) {
     return data;
   }
 
-  // Phase 1: Suppliers (with live balance_due calculation)
+  // Phase 1: Suppliers (with live balance_due calculation from immutable ledger)
   if (pathname === '/api/purchases/suppliers' && method === 'GET') {
+    const viewRes = await sb.from('v_supplier_balances').select('*').order('name', { ascending: true });
+    if (!viewRes.error) {
+      const suppliers = (viewRes.data || []).map((s) => ({
+        ...s,
+        default_payment_type: s.default_payment_type || 'cash',
+        credit_days: Number(s.credit_days || 0),
+        purchase_count: Number(s.purchase_count || 0),
+        transaction_count: Number(s.transaction_count || 0),
+        total_purchased: Number(s.total_purchased || 0),
+        total_paid: Number(s.total_paid || 0),
+        net_balance: Number(s.net_balance || 0),
+        balance_due: Number(s.balance_due || 0),
+        advance_balance: Number(s.advance_balance || 0),
+      }));
+      return { suppliers };
+    }
+
+    // Fallback when Migration 005 has not been applied yet
     const [{ data: sups, error: e1 }, { data: pos, error: e2 }] = await Promise.all([
       sb.from('suppliers').select('*').order('name', { ascending: true }),
       sb.from('purchases').select('supplier_id, total_landed_cost, amount_paid, payment_status'),
@@ -189,11 +207,102 @@ async function supabaseApiFetch(path, options = {}) {
         purchase_count: st.count,
         total_purchased: Number(st.total.toFixed(2)),
         total_paid: Number(st.paid.toFixed(2)),
+        net_balance: Number((st.total - st.paid).toFixed(2)),
         balance_due: Number(st.due.toFixed(2)),
+        advance_balance: Number(Math.max(0, st.paid - st.total).toFixed(2)),
       };
     });
     return { suppliers };
   }
+
+  // Phase 1: Supplier Statement (chronological ledger + cumulative running balance)
+  const supStmtMatch = pathname.match(/^\/api\/purchases\/suppliers\/(\d+)\/statement$/);
+  if (supStmtMatch && method === 'GET') {
+    const supplierId = Number(supStmtMatch[1]);
+    const rpcRes = await sb.rpc('erp_get_supplier_statement', { p_supplier_id: supplierId });
+    if (!rpcRes.error && rpcRes.data) {
+      return rpcRes.data;
+    }
+
+    // Fallback when Migration 005 has not been applied yet
+    const [{ data: sup, error: eSup }, { data: pos, error: ePo }, { data: pays, error: ePay }] = await Promise.all([
+      sb.from('suppliers').select('*').eq('id', supplierId).single(),
+      sb.from('purchases').select('*, raw_materials ( name, name_ar )').eq('supplier_id', supplierId),
+      sb.from('supplier_payments').select('*, purchases ( reference_no )').eq('supplier_id', supplierId),
+    ]);
+    if (eSup) throw new Error(eSup.message);
+    if (ePo) throw new Error(ePo.message);
+    if (ePay) throw new Error(ePay.message);
+
+    const raw = [];
+    for (const p of pos || []) {
+      raw.push({
+        entry_type: 'purchase',
+        sort_rank: 1,
+        source_id: p.id,
+        entry_date: String(p.purchase_date).slice(0, 10),
+        created_at: p.created_at,
+        reference_no: p.reference_no,
+        purchase_id: p.id,
+        purchase_ref: p.reference_no,
+        is_reversed: false,
+        payment_method: p.payment_type || 'cash',
+        description: p.raw_materials?.name || 'Purchase',
+        description_ar: p.raw_materials?.name_ar || p.raw_materials?.name || 'فاتورة شراء',
+        notes: p.notes || '',
+        debit_amount: Number(p.total_landed_cost || 0),
+        credit_amount: 0,
+      });
+    }
+    for (const sp of pays || []) {
+      const txType = sp.transaction_type || 'payment';
+      const isRev = txType === 'reversal';
+      raw.push({
+        entry_type: txType,
+        sort_rank: txType === 'down_payment' ? 2 : txType === 'payment' ? 3 : 4,
+        source_id: sp.id,
+        entry_date: String(sp.payment_date).slice(0, 10),
+        created_at: sp.created_at,
+        reference_no: sp.reference_no || `#${sp.id}`,
+        purchase_id: sp.purchase_id,
+        purchase_ref: sp.purchases?.reference_no || null,
+        reversed_payment_id: sp.reversed_payment_id || null,
+        is_reversed: false,
+        payment_method: sp.payment_method || 'cash',
+        description: isRev ? 'Payment reversal' : 'Supplier payment',
+        description_ar: isRev ? 'عكس دفعة' : 'سداد دفعة',
+        notes: sp.notes || '',
+        debit_amount: isRev ? Number(sp.amount || 0) : 0,
+        credit_amount: isRev ? 0 : Number(sp.amount || 0),
+      });
+    }
+    raw.sort(
+      (a, b) =>
+        a.entry_date.localeCompare(b.entry_date) ||
+        a.sort_rank - b.sort_rank ||
+        String(a.created_at || '').localeCompare(String(b.created_at || '')) ||
+        a.source_id - b.source_id
+    );
+    let running = 0;
+    const entries = raw.map((r) => {
+      running = Number((running + r.debit_amount - r.credit_amount).toFixed(2));
+      return { ...r, running_balance: running };
+    });
+    const totalPurchased = (pos || []).reduce((acc, p) => acc + Number(p.total_landed_cost || 0), 0);
+    const totalPaid = (pos || []).reduce((acc, p) => acc + Number(p.amount_paid || 0), 0);
+    return {
+      supplier: {
+        ...sup,
+        total_purchased: Number(totalPurchased.toFixed(2)),
+        total_paid: Number(totalPaid.toFixed(2)),
+        net_balance: Number((totalPurchased - totalPaid).toFixed(2)),
+        balance_due: Number(Math.max(0, totalPurchased - totalPaid).toFixed(2)),
+        advance_balance: Number(Math.max(0, totalPaid - totalPurchased).toFixed(2)),
+      },
+      entries,
+    };
+  }
+
   if (pathname === '/api/purchases/suppliers' && method === 'POST') {
     const { data, error } = await sb
       .from('suppliers')
@@ -234,8 +343,18 @@ async function supabaseApiFetch(path, options = {}) {
     return { ok: true };
   }
 
-  // Phase 1: Supplier Payments (آجل settlements)
+  // Phase 1: Supplier Payments (Immutable Ledger Transactions)
   if (pathname === '/api/purchases/supplier-payments' && method === 'GET') {
+    const viewRes = await sb
+      .from('v_supplier_payment_ledger')
+      .select('*')
+      .order('payment_date', { ascending: false })
+      .order('id', { ascending: false });
+    if (!viewRes.error) {
+      return { payments: viewRes.data || [] };
+    }
+
+    // Fallback when Migration 005 has not been applied yet
     const { data, error } = await sb
       .from('supplier_payments')
       .select(`*, suppliers ( name, name_ar ), purchases ( reference_no )`)
@@ -244,6 +363,9 @@ async function supabaseApiFetch(path, options = {}) {
     if (error) throw new Error(error.message);
     const payments = (data || []).map((sp) => ({
       ...sp,
+      transaction_type: sp.transaction_type || 'payment',
+      signed_amount: sp.transaction_type === 'reversal' ? -Number(sp.amount || 0) : Number(sp.amount || 0),
+      is_reversed: false,
       supplier_name: sp.suppliers?.name,
       supplier_name_ar: sp.suppliers?.name_ar,
       purchase_ref: sp.purchases?.reference_no,
@@ -263,11 +385,18 @@ async function supabaseApiFetch(path, options = {}) {
     if (error) throw new Error(error.message);
     return { payment: data };
   }
-  const supPayDelMatch = pathname.match(/^\/api\/purchases\/supplier-payments\/(\d+)$/);
-  if (supPayDelMatch && method === 'DELETE') {
-    const { data, error } = await sb.rpc('erp_cancel_supplier_payment', {
-      p_payment_id: Number(supPayDelMatch[1]),
+  const supPayRevMatch = pathname.match(/^\/api\/purchases\/supplier-payments\/(\d+)(?:\/reverse)?$/);
+  if (supPayRevMatch && (method === 'DELETE' || (method === 'POST' && pathname.endsWith('/reverse')))) {
+    const paymentId = Number(supPayRevMatch[1]);
+    let { data, error } = await sb.rpc('erp_cancel_supplier_payment', {
+      p_payment_id: paymentId,
+      p_notes: body.notes || '',
     });
+    if (error && /p_notes|function.*does not exist/i.test(error.message || '')) {
+      const retry = await sb.rpc('erp_cancel_supplier_payment', { p_payment_id: paymentId });
+      data = retry.data;
+      error = retry.error;
+    }
     if (error) throw new Error(error.message);
     return data;
   }
@@ -340,8 +469,18 @@ async function supabaseApiFetch(path, options = {}) {
     return { material: data };
   }
 
-  // Phase 1: Purchases
+  // Phase 1: Purchases (with dynamic ledger-computed amount_paid, remaining_due & payment_status)
   if (pathname === '/api/purchases' && method === 'GET') {
+    const viewRes = await sb
+      .from('v_purchase_balances')
+      .select('*')
+      .order('purchase_date', { ascending: false })
+      .order('id', { ascending: false });
+    if (!viewRes.error) {
+      return { purchases: viewRes.data || [] };
+    }
+
+    // Fallback when Migration 005 has not been applied yet
     const { data, error } = await sb
       .from('purchases')
       .select(`
@@ -373,7 +512,7 @@ async function supabaseApiFetch(path, options = {}) {
     return { purchases };
   }
   if (pathname === '/api/purchases' && method === 'POST') {
-    const { data, error } = await sb.rpc('erp_record_purchase', {
+    const rpcPayload = {
       p_raw_material_id: Number(body.raw_material_id),
       p_purchase_qty: Number(body.purchase_qty),
       p_unit_price: Number(body.unit_price),
@@ -387,7 +526,15 @@ async function supabaseApiFetch(path, options = {}) {
       p_payment_type: body.payment_type === 'credit' ? 'credit' : 'cash',
       p_amount_paid: body.payment_type === 'credit' ? Number(body.amount_paid || 0) : null,
       p_due_date: body.due_date || null,
-    });
+      p_payment_method: body.payment_method || 'cash',
+    };
+    let { data, error } = await sb.rpc('erp_record_purchase', rpcPayload);
+    if (error && /p_payment_method|function.*does not exist/i.test(error.message || '')) {
+      const { p_payment_method: _omit, ...legacyPayload } = rpcPayload;
+      const retry = await sb.rpc('erp_record_purchase', legacyPayload);
+      data = retry.data;
+      error = retry.error;
+    }
     if (error) throw new Error(error.message);
     return { purchase: data };
   }

@@ -17,8 +17,8 @@ export async function seedDemoData({ force = false } = {}) {
     await query(`
       TRUNCATE TABLE
         stock_movements, sales_order_items, sales_orders, ad_spend,
-        bottling_batches, finished_products, hidden_costs, purchases,
-        raw_materials, suppliers
+        bottling_batches, finished_products, hidden_costs, supplier_payments,
+        purchases, raw_materials, suppliers
       RESTART IDENTITY CASCADE
     `);
   }
@@ -63,14 +63,24 @@ export async function seedDemoData({ force = false } = {}) {
       const totalLanded = Number((subtotal + hiddenCost).toFixed(2));
       const landedPerBase = Number((totalLanded / baseQty).toFixed(4));
 
-      await tx.query(
+      const poRes = await tx.query(
         `INSERT INTO purchases
           (reference_no, purchase_date, supplier_id, raw_material_id, purchase_qty, units_per_purchase,
            base_qty, unit_price, subtotal, hidden_cost, total_landed_cost, landed_cost_per_base_unit,
-           harvest_lot, payment_status, notes)
-         VALUES ($1,$2::date,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'paid',$14)`,
+           harvest_lot, payment_type, amount_paid, payment_status, notes)
+         VALUES ($1,$2::date,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'cash',0,'unpaid',$14)
+         RETURNING id`,
         [ref, date, supplierId, materialId, qty, factor, baseQty, unitPrice, subtotal, hiddenCost, totalLanded, landedPerBase, lot, notes]
       );
+
+      if (supplierId && totalLanded > 0) {
+        await tx.query(
+          `INSERT INTO supplier_payments
+            (payment_date, supplier_id, purchase_id, amount, payment_method, transaction_type, reversed_payment_id, reference_no, notes)
+           VALUES ($1::date, $2, $3, $4, 'cash', 'down_payment', NULL, $5, $6)`,
+          [date, supplierId, poRes.rows[0].id, totalLanded, `CASH-${ref}`, `Cash purchase payment (${ref})`]
+        );
+      }
 
       const curQty = Number(m.stock_qty);
       const curAvg = Number(m.avg_unit_cost);

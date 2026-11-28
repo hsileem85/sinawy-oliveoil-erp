@@ -34,6 +34,7 @@ export default function Purchases({ lang }) {
     hidden_cost: '0',
     harvest_lot: '',
     payment_type: 'cash',
+    payment_method: 'cash',
     amount_paid: '0',
     due_date: '',
     notes: '',
@@ -124,6 +125,7 @@ export default function Purchases({ lang }) {
       hidden_cost: '0',
       harvest_lot: '',
       payment_type: defaultPayType,
+      payment_method: 'cash',
       amount_paid: '0',
       due_date: defaultPayType === 'credit' ? calcDueDate(today, defaultSup?.credit_days || 30) : '',
       notes: '',
@@ -143,6 +145,7 @@ export default function Purchases({ lang }) {
       hidden_cost: String(po.hidden_cost ?? 0),
       harvest_lot: po.harvest_lot || '',
       payment_type: po.payment_type === 'credit' ? 'credit' : 'cash',
+      payment_method: 'cash',
       amount_paid: String(po.amount_paid ?? 0),
       due_date: po.due_date ? String(po.due_date).slice(0, 10) : '',
       notes: po.notes || '',
@@ -213,8 +216,9 @@ export default function Purchases({ lang }) {
   const previewSubtotal = previewQty * (Number(pForm.unit_price) || 0);
   const previewLanded = previewSubtotal + (Number(pForm.hidden_cost) || 0);
   const previewPerBase = previewBaseAdded > 0 ? previewLanded / previewBaseAdded : 0;
-  const previewRemainingDue =
-    pForm.payment_type === 'credit'
+  const previewRemainingDue = editingPurchase
+    ? Math.max(0, previewLanded - (Number(editingPurchase.amount_paid) || 0))
+    : pForm.payment_type === 'credit'
       ? Math.max(0, previewLanded - (Number(pForm.amount_paid) || 0))
       : 0;
 
@@ -232,6 +236,7 @@ export default function Purchases({ lang }) {
         unit_price: Number(pForm.unit_price),
         hidden_cost: Number(pForm.hidden_cost) || 0,
         payment_type: pForm.payment_type,
+        payment_method: pForm.payment_method || 'cash',
         amount_paid: pForm.payment_type === 'credit' ? Number(pForm.amount_paid || 0) : previewLanded,
         due_date: pForm.payment_type === 'credit' && pForm.due_date ? pForm.due_date : null,
       };
@@ -806,19 +811,46 @@ export default function Purchases({ lang }) {
               </select>
             </div>
 
+            {!editingPurchase && (pForm.payment_type === 'cash' || Number(pForm.amount_paid) > 0) && (
+              <div className="form-field">
+                <label className="form-label">{t(lang, 'paymentMethod')}</label>
+                <select
+                  className="select"
+                  value={pForm.payment_method}
+                  onChange={(e) => setPForm({ ...pForm, payment_method: e.target.value })}
+                >
+                  {['cash', 'instapay', 'bank_transfer', 'vodafone_cash', 'cheque'].map((pm) => (
+                    <option key={pm} value={pm}>{t(lang, `pay_${pm}`)}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+
             {pForm.payment_type === 'credit' && (
               <>
-                <div className="form-field">
-                  <label className="form-label">{t(lang, 'amountPaidNow')}</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    className="input"
-                    value={pForm.amount_paid}
-                    onChange={(e) => setPForm({ ...pForm, amount_paid: e.target.value })}
-                  />
-                </div>
+                {!editingPurchase ? (
+                  <div className="form-field">
+                    <label className="form-label">{t(lang, 'amountPaidNow')}</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      className="input"
+                      value={pForm.amount_paid}
+                      onChange={(e) => setPForm({ ...pForm, amount_paid: e.target.value })}
+                    />
+                  </div>
+                ) : (
+                  <div className="form-field">
+                    <label className="form-label">{t(lang, 'totalPaid')}</label>
+                    <input
+                      type="text"
+                      className="input"
+                      value={formatEGP(editingPurchase.amount_paid || 0, lang)}
+                      disabled
+                    />
+                  </div>
+                )}
                 <div className="form-field">
                   <label className="form-label">{t(lang, 'dueDate')}</label>
                   <input
@@ -829,6 +861,14 @@ export default function Purchases({ lang }) {
                   />
                 </div>
               </>
+            )}
+
+            {editingPurchase && editingPurchase.supplier_id && (
+              <div className="form-field full">
+                <div className="ledger-note-bar" style={{ marginBottom: 0 }}>
+                  <span>{t(lang, 'editPurchaseLedgerHint')}</span>
+                </div>
+              </div>
             )}
 
             <div className="form-field">

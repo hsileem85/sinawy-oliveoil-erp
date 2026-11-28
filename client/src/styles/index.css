@@ -1349,3 +1349,98 @@ table.data-table tbody tr:last-child td {
     grid-template-columns: 1fr;
   }
 }
+
+/* ==================== IMMUTABLE LEDGER & SUPPLIER STATEMENT ==================== */
+.btn-danger {
+  background: var(--clay-danger);
+  color: #fff;
+  border: 1px solid var(--clay-danger);
+}
+.btn-danger:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+.ledger-note-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  border-radius: var(--radius-sm);
+  background: var(--olive-soft);
+  border: 1px solid hsla(88, 36%, 24%, 0.16);
+  color: var(--olive-text);
+  font-size: 13px;
+}
+
+.ledger-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.ledger-sup-select {
+  width: 240px;
+}
+
+.row-reversed td {
+  opacity: 0.65;
+}
+
+.row-reversal {
+  background: hsla(14, 65%, 94%, 0.42);
+}
+
+.val-reversed {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.statement-controls {
+  padding: 18px 20px;
+}
+
+.statement-controls-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.statement-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-hairline);
+}
+
+.statement-summary-item {
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-hairline);
+}
+
+@media (max-width: 768px) {
+  .ledger-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .ledger-sup-select {
+    width: 100%;
+  }
+  .statement-controls-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .statement-summary-grid {
+    grid-template-columns: 1fr;
+  }
+}
+

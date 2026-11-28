@@ -13,17 +13,101 @@ function genRef(prefix) {
 /* ==================== SUPPLIERS ==================== */
 router.get('/suppliers', async (_req, res) => {
   const result = await query(`
-    SELECT s.*,
-           COUNT(p.id)::int AS purchase_count,
-           COALESCE(SUM(p.total_landed_cost), 0) AS total_purchased,
-           COALESCE(SUM(p.amount_paid), 0) AS total_paid,
-           COALESCE(SUM(GREATEST(0, p.total_landed_cost - p.amount_paid)), 0) AS balance_due
-    FROM suppliers s
-    LEFT JOIN purchases p ON p.supplier_id = s.id
-    GROUP BY s.id
-    ORDER BY s.name ASC
+    SELECT *
+    FROM v_supplier_balances
+    ORDER BY name ASC
   `);
   res.json({ suppliers: result.rows });
+});
+
+router.get('/suppliers/:id/statement', async (req, res) => {
+  try {
+    const supplierId = Number(req.params.id);
+    const supRes = await query('SELECT * FROM v_supplier_balances WHERE id = $1', [supplierId]);
+    if (supRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Supplier not found' });
+    }
+
+    const entriesRes = await query(
+      `WITH raw_entries AS (
+         SELECT
+           'purchase'::text AS entry_type,
+           1 AS sort_rank,
+           p.id AS source_id,
+           p.purchase_date AS entry_date,
+           p.created_at,
+           p.reference_no,
+           p.id AS purchase_id,
+           p.reference_no AS purchase_ref,
+           NULL::integer AS reversed_payment_id,
+           NULL::text AS reversed_ref,
+           FALSE AS is_reversed,
+           NULL::text AS reversal_ref,
+           p.payment_type AS payment_method,
+           rm.name AS description,
+           rm.name_ar AS description_ar,
+           p.notes,
+           ROUND(p.total_landed_cost, 2) AS debit_amount,
+           0::numeric(12, 2) AS credit_amount
+         FROM purchases p
+         JOIN raw_materials rm ON rm.id = p.raw_material_id
+         WHERE p.supplier_id = $1
+
+         UNION ALL
+
+         SELECT
+           sp.transaction_type AS entry_type,
+           CASE sp.transaction_type
+             WHEN 'down_payment' THEN 2
+             WHEN 'payment' THEN 3
+             ELSE 4
+           END AS sort_rank,
+           sp.id AS source_id,
+           sp.payment_date AS entry_date,
+           sp.created_at,
+           COALESCE(sp.reference_no, '#' || sp.id::text) AS reference_no,
+           sp.purchase_id,
+           sp.purchase_ref,
+           sp.reversed_payment_id,
+           sp.reversed_ref,
+           sp.is_reversed,
+           sp.reversal_ref,
+           sp.payment_method,
+           CASE sp.transaction_type
+             WHEN 'down_payment' THEN COALESCE('Down payment — ' || sp.purchase_ref, 'Down payment')
+             WHEN 'reversal' THEN 'Reversal of ' || COALESCE(sp.reversed_ref, '#' || sp.reversed_payment_id::text)
+             ELSE COALESCE('Payment — ' || sp.purchase_ref, 'Account settlement payment')
+           END AS description,
+           CASE sp.transaction_type
+             WHEN 'down_payment' THEN COALESCE('دفعة مقدمة — ' || sp.purchase_ref, 'دفعة مقدمة')
+             WHEN 'reversal' THEN 'عكس دفعة ' || COALESCE(sp.reversed_ref, '#' || sp.reversed_payment_id::text)
+             ELSE COALESCE('سداد دفعة — ' || sp.purchase_ref, 'سداد دفعة على الحساب')
+           END AS description_ar,
+           sp.notes,
+           CASE WHEN sp.transaction_type = 'reversal' THEN ROUND(sp.amount, 2) ELSE 0::numeric(12, 2) END AS debit_amount,
+           CASE WHEN sp.transaction_type = 'reversal' THEN 0::numeric(12, 2) ELSE ROUND(sp.amount, 2) END AS credit_amount
+         FROM v_supplier_payment_ledger sp
+         WHERE sp.supplier_id = $1
+       )
+       SELECT
+         re.*,
+         ROUND(
+           SUM(re.debit_amount - re.credit_amount) OVER (
+             ORDER BY re.entry_date ASC, re.sort_rank ASC, re.created_at ASC, re.source_id ASC
+             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+           ),
+           2
+         ) AS running_balance
+       FROM raw_entries re
+       ORDER BY re.entry_date ASC, re.sort_rank ASC, re.created_at ASC, re.source_id ASC`,
+      [supplierId]
+    );
+
+    res.json({ supplier: supRes.rows[0], entries: entriesRes.rows });
+  } catch (err) {
+    console.error('Supplier statement error:', err);
+    res.status(500).json({ error: 'Failed to load supplier statement' });
+  }
 });
 
 router.post('/suppliers', async (req, res) => {
@@ -95,21 +179,16 @@ router.delete('/suppliers/:id', async (req, res) => {
     res.json({ ok: true });
   } catch (err) {
     console.error('Delete supplier error:', err);
-    res.status(500).json({ error: 'Failed to delete supplier' });
+    res.status(400).json({ error: err.message || 'Failed to delete supplier' });
   }
 });
 
-/* ==================== SUPPLIER PAYMENTS (آجل SETTLEMENT) ==================== */
+/* ==================== SUPPLIER PAYMENTS (IMMUTABLE LEDGER) ==================== */
 router.get('/supplier-payments', async (_req, res) => {
   const result = await query(`
-    SELECT sp.*,
-           s.name AS supplier_name,
-           s.name_ar AS supplier_name_ar,
-           p.reference_no AS purchase_ref
-    FROM supplier_payments sp
-    JOIN suppliers s ON s.id = sp.supplier_id
-    LEFT JOIN purchases p ON p.id = sp.purchase_id
-    ORDER BY sp.payment_date DESC, sp.id DESC
+    SELECT *
+    FROM v_supplier_payment_ledger
+    ORDER BY payment_date DESC, id DESC
   `);
   res.json({ payments: result.rows });
 });
@@ -132,71 +211,59 @@ router.post('/supplier-payments', async (req, res) => {
     }
 
     const payment = await withTransaction(async (tx) => {
-      const ref = reference_no?.trim() || genRef('PAY');
-      const pRes = await tx.query(
-        `INSERT INTO supplier_payments (payment_date, supplier_id, purchase_id, amount, payment_method, reference_no, notes)
-         VALUES (COALESCE($1::date, CURRENT_DATE), $2, $3, $4, $5, $6, $7) RETURNING *`,
-        [payment_date || null, Number(supplier_id), purchase_id ? Number(purchase_id) : null, Number(amt.toFixed(2)), payment_method, ref, notes]
-      );
-
-      let remaining = Number(amt.toFixed(2));
+      const supCheck = await tx.query('SELECT id FROM suppliers WHERE id = $1', [Number(supplier_id)]);
+      if (supCheck.rows.length === 0) {
+        const e = new Error('Supplier not found');
+        e.status = 404;
+        throw e;
+      }
 
       if (purchase_id) {
-        const poRes = await tx.query(
-          'SELECT id, total_landed_cost, amount_paid FROM purchases WHERE id = $1 AND supplier_id = $2',
+        const poCheck = await tx.query(
+          'SELECT id FROM purchases WHERE id = $1 AND supplier_id = $2',
           [Number(purchase_id), Number(supplier_id)]
         );
-        if (poRes.rows.length > 0) {
-          const po = poRes.rows[0];
-          const due = Math.max(0, Number(po.total_landed_cost) - Number(po.amount_paid));
-          const apply = Math.min(remaining, due);
-          if (apply > 0) {
-            const nextPaid = Number((Number(po.amount_paid) + apply).toFixed(2));
-            await tx.query(
-              `UPDATE purchases SET amount_paid = $1, payment_status = CASE WHEN $1 >= total_landed_cost THEN 'paid' ELSE 'partial' END WHERE id = $2`,
-              [nextPaid, po.id]
-            );
-            remaining = Number((remaining - apply).toFixed(2));
-          }
+        if (poCheck.rows.length === 0) {
+          const e = new Error('Selected purchase invoice does not belong to this supplier');
+          e.status = 400;
+          throw e;
         }
       }
 
-      if (remaining > 0) {
-        const openPos = await tx.query(
-          `SELECT id, total_landed_cost, amount_paid
-           FROM purchases
-           WHERE supplier_id = $1 AND amount_paid < total_landed_cost
-           ORDER BY purchase_date ASC, id ASC`,
-          [Number(supplier_id)]
-        );
-        for (const po of openPos.rows) {
-          if (remaining <= 0) break;
-          const due = Math.max(0, Number(po.total_landed_cost) - Number(po.amount_paid));
-          const apply = Math.min(remaining, due);
-          if (apply > 0) {
-            const nextPaid = Number((Number(po.amount_paid) + apply).toFixed(2));
-            await tx.query(
-              `UPDATE purchases SET amount_paid = $1, payment_status = CASE WHEN $1 >= total_landed_cost THEN 'paid' ELSE 'partial' END WHERE id = $2`,
-              [nextPaid, po.id]
-            );
-            remaining = Number((remaining - apply).toFixed(2));
-          }
-        }
-      }
+      // Append-only ledger transaction (ZERO UPDATE on purchases!)
+      const ref = reference_no?.trim() || genRef('PAY');
+      const pRes = await tx.query(
+        `INSERT INTO supplier_payments
+           (payment_date, supplier_id, purchase_id, amount, payment_method, transaction_type, reversed_payment_id, reference_no, notes)
+         VALUES (COALESCE($1::date, CURRENT_DATE), $2, $3, $4, $5, 'payment', NULL, $6, $7)
+         RETURNING id`,
+        [
+          payment_date || null,
+          Number(supplier_id),
+          purchase_id ? Number(purchase_id) : null,
+          Number(amt.toFixed(2)),
+          payment_method,
+          ref,
+          notes,
+        ]
+      );
 
-      return pRes.rows[0];
+      const ledgerRow = await tx.query('SELECT * FROM v_supplier_payment_ledger WHERE id = $1', [pRes.rows[0].id]);
+      return ledgerRow.rows[0];
     });
 
     res.status(201).json({ payment });
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
     console.error('Create supplier payment error:', err);
     res.status(500).json({ error: 'Failed to record supplier payment' });
   }
 });
 
-router.delete('/supplier-payments/:id', async (req, res) => {
+async function reverseSupplierPaymentHandler(req, res) {
   try {
     const id = Number(req.params.id);
+    const notes = req.body?.notes || '';
     const result = await withTransaction(async (tx) => {
       const pRes = await tx.query('SELECT * FROM supplier_payments WHERE id = $1', [id]);
       if (pRes.rows.length === 0) {
@@ -205,64 +272,59 @@ router.delete('/supplier-payments/:id', async (req, res) => {
         throw e;
       }
       const pay = pRes.rows[0];
-      let remaining = Number(pay.amount);
 
-      if (pay.purchase_id) {
-        const poRes = await tx.query(
-          'SELECT id, total_landed_cost, amount_paid FROM purchases WHERE id = $1 AND supplier_id = $2',
-          [pay.purchase_id, pay.supplier_id]
-        );
-        if (poRes.rows.length > 0 && Number(poRes.rows[0].amount_paid) > 0) {
-          const po = poRes.rows[0];
-          const deduct = Math.min(remaining, Number(po.amount_paid));
-          const nextPaid = Number(Math.max(0, Number(po.amount_paid) - deduct).toFixed(2));
-          await tx.query(
-            `UPDATE purchases
-             SET amount_paid = $1,
-                 payment_status = CASE WHEN $1 >= total_landed_cost THEN 'paid' WHEN $1 > 0 THEN 'partial' ELSE 'unpaid' END
-             WHERE id = $2`,
-            [nextPaid, po.id]
-          );
-          remaining = Number((remaining - deduct).toFixed(2));
-        }
+      if (pay.transaction_type === 'reversal') {
+        const e = new Error('Cannot reverse a reversal transaction');
+        e.status = 400;
+        throw e;
       }
 
-      if (remaining > 0) {
-        const pos = await tx.query(
-          `SELECT id, total_landed_cost, amount_paid
-           FROM purchases
-           WHERE supplier_id = $1 AND amount_paid > 0
-           ORDER BY CASE WHEN payment_type = 'credit' THEN 0 ELSE 1 END ASC, purchase_date DESC, id DESC`,
-          [pay.supplier_id]
-        );
-        for (const po of pos.rows) {
-          if (remaining <= 0) break;
-          const deduct = Math.min(remaining, Number(po.amount_paid));
-          if (deduct > 0) {
-            const nextPaid = Number(Math.max(0, Number(po.amount_paid) - deduct).toFixed(2));
-            await tx.query(
-              `UPDATE purchases
-               SET amount_paid = $1,
-                   payment_status = CASE WHEN $1 >= total_landed_cost THEN 'paid' WHEN $1 > 0 THEN 'partial' ELSE 'unpaid' END
-               WHERE id = $2`,
-              [nextPaid, po.id]
-            );
-            remaining = Number((remaining - deduct).toFixed(2));
-          }
-        }
+      const existingRev = await tx.query(
+        'SELECT id FROM supplier_payments WHERE reversed_payment_id = $1',
+        [pay.id]
+      );
+      if (existingRev.rows.length > 0) {
+        const e = new Error('This payment has already been reversed');
+        e.status = 409;
+        throw e;
       }
 
-      await tx.query('DELETE FROM supplier_payments WHERE id = $1', [id]);
-      return pay;
+      // Append-only reversal transaction (ZERO UPDATE / ZERO DELETE!)
+      const revRef = genRef('REV');
+      const revNotes = String(notes).trim() || `Reversal of ${pay.reference_no || `#${pay.id}`}`;
+      const revRes = await tx.query(
+        `INSERT INTO supplier_payments
+           (payment_date, supplier_id, purchase_id, amount, payment_method, transaction_type, reversed_payment_id, reference_no, notes)
+         VALUES (CURRENT_DATE, $1, $2, $3, $4, 'reversal', $5, $6, $7)
+         RETURNING id`,
+        [
+          pay.supplier_id,
+          pay.purchase_id,
+          Number(Number(pay.amount).toFixed(2)),
+          pay.payment_method,
+          pay.id,
+          revRef,
+          revNotes,
+        ]
+      );
+
+      const ledgerRev = await tx.query('SELECT * FROM v_supplier_payment_ledger WHERE id = $1', [revRes.rows[0].id]);
+      return { reversal: ledgerRev.rows[0], cancelled_payment: pay };
     });
 
-    res.json({ ok: true, cancelled_payment: result });
+    res.json({ ok: true, ...result });
   } catch (err) {
     if (err.status) return res.status(err.status).json({ error: err.message });
-    console.error('Cancel supplier payment error:', err);
-    res.status(500).json({ error: 'Failed to cancel supplier payment' });
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'This payment has already been reversed' });
+    }
+    console.error('Reverse supplier payment error:', err);
+    res.status(500).json({ error: 'Failed to reverse supplier payment' });
   }
-});
+}
+
+router.post('/supplier-payments/:id/reverse', reverseSupplierPaymentHandler);
+router.delete('/supplier-payments/:id', reverseSupplierPaymentHandler);
 
 /* ==================== RAW MATERIALS ==================== */
 router.get('/materials', async (_req, res) => {
@@ -432,24 +494,13 @@ router.get('/', async (req, res) => {
   let where = '';
   if (category && category !== 'all') {
     params.push(category);
-    where = 'WHERE rm.category = $1';
+    where = 'WHERE material_category = $1';
   }
   const result = await query(
-    `SELECT p.*,
-            GREATEST(0, p.total_landed_cost - p.amount_paid) AS remaining_due,
-            rm.code AS material_code,
-            rm.name AS material_name,
-            rm.name_ar AS material_name_ar,
-            rm.category AS material_category,
-            rm.base_unit,
-            rm.purchase_unit,
-            s.name AS supplier_name,
-            s.name_ar AS supplier_name_ar
-     FROM purchases p
-     JOIN raw_materials rm ON rm.id = p.raw_material_id
-     LEFT JOIN suppliers s ON s.id = p.supplier_id
+    `SELECT *
+     FROM v_purchase_balances
      ${where}
-     ORDER BY p.purchase_date DESC, p.id DESC`,
+     ORDER BY purchase_date DESC, id DESC`,
     params
   );
   res.json({ purchases: result.rows });
@@ -467,6 +518,7 @@ router.post('/', async (req, res) => {
       hidden_cost = 0,
       harvest_lot = '',
       payment_type = 'cash',
+      payment_method = 'cash',
       amount_paid,
       due_date = null,
       notes = '',
@@ -497,14 +549,18 @@ router.post('/', async (req, res) => {
       const landedPerBase = Number((totalLandedCost / baseQty).toFixed(4));
       const refNo = genRef('PO');
 
+      const resolvedSupplierId = supplier_id ? Number(supplier_id) : null;
       const resolvedPayType = payment_type === 'credit' ? 'credit' : 'cash';
-      let resolvedPaid = totalLandedCost;
+      const validMethods = new Set(['cash', 'bank_transfer', 'instapay', 'vodafone_cash', 'cheque']);
+      const resolvedPayMethod = validMethods.has(payment_method) ? payment_method : 'cash';
+
+      let initialPaid = totalLandedCost;
       let resolvedPayStatus = 'paid';
       if (resolvedPayType === 'credit') {
-        resolvedPaid = Math.min(totalLandedCost, Math.max(0, Number(amount_paid) || 0));
-        resolvedPaid = Number(resolvedPaid.toFixed(2));
+        initialPaid = Math.min(totalLandedCost, Math.max(0, Number(amount_paid) || 0));
+        initialPaid = Number(initialPaid.toFixed(2));
         resolvedPayStatus =
-          resolvedPaid >= totalLandedCost ? 'paid' : resolvedPaid > 0 ? 'partial' : 'unpaid';
+          initialPaid >= totalLandedCost ? 'paid' : initialPaid > 0 ? 'partial' : 'unpaid';
       }
 
       const pRes = await tx.query(
@@ -513,11 +569,11 @@ router.post('/', async (req, res) => {
            base_qty, unit_price, subtotal, hidden_cost, total_landed_cost, landed_cost_per_base_unit,
            harvest_lot, payment_type, amount_paid, due_date, payment_status, notes)
          VALUES ($1, COALESCE($2::date, CURRENT_DATE), $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::date, $17, $18)
-         RETURNING *`,
+         RETURNING id`,
         [
           refNo,
           purchase_date || null,
-          supplier_id ? Number(supplier_id) : null,
+          resolvedSupplierId,
           Number(raw_material_id),
           qty,
           factor,
@@ -529,12 +585,28 @@ router.post('/', async (req, res) => {
           landedPerBase,
           harvest_lot,
           resolvedPayType,
-          resolvedPaid,
-          due_date || null,
-          resolvedPayStatus,
+          resolvedSupplierId ? 0 : initialPaid,
+          resolvedPayType === 'credit' ? due_date || null : null,
+          resolvedSupplierId ? 'unpaid' : resolvedPayStatus,
           notes,
         ]
       );
+      const purchaseId = pRes.rows[0].id;
+
+      // Record immutable down_payment transaction in supplier_payments when paid upfront to a supplier
+      if (resolvedSupplierId && initialPaid > 0) {
+        const dpRef = resolvedPayType === 'cash' ? `CASH-${refNo}` : `DP-${refNo}`;
+        const dpNotes =
+          resolvedPayType === 'cash'
+            ? `Cash purchase payment (${refNo})`
+            : `Down payment on purchase (${refNo})`;
+        await tx.query(
+          `INSERT INTO supplier_payments
+             (payment_date, supplier_id, purchase_id, amount, payment_method, transaction_type, reversed_payment_id, reference_no, notes)
+           VALUES (COALESCE($1::date, CURRENT_DATE), $2, $3, $4, $5, 'down_payment', NULL, $6, $7)`,
+          [purchase_date || null, resolvedSupplierId, purchaseId, initialPaid, resolvedPayMethod, dpRef, dpNotes]
+        );
+      }
 
       // Weighted Average Cost update on raw_materials
       const curQty = Number(mat.stock_qty) || 0;
@@ -581,7 +653,8 @@ router.post('/', async (req, res) => {
         );
       }
 
-      return pRes.rows[0];
+      const balRes = await tx.query('SELECT * FROM v_purchase_balances WHERE id = $1', [purchaseId]);
+      return balRes.rows[0];
     });
 
     res.status(201).json({ purchase: created });
@@ -626,6 +699,23 @@ router.patch('/:id', async (req, res) => {
         throw e;
       }
       const old = oldRes.rows[0];
+      const nextSupplierId = supplier_id ? Number(supplier_id) : null;
+
+      if ((old.supplier_id ?? null) !== nextSupplierId) {
+        const activePay = await tx.query(
+          `SELECT 1 FROM supplier_payments sp
+           WHERE sp.purchase_id = $1
+             AND sp.transaction_type <> 'reversal'
+             AND NOT EXISTS (SELECT 1 FROM supplier_payments r WHERE r.reversed_payment_id = sp.id)
+           LIMIT 1`,
+          [id]
+        );
+        if (activePay.rows.length > 0) {
+          const e = new Error('Cannot change supplier on a purchase that has active payment transactions. Reverse the payments first.');
+          e.status = 409;
+          throw e;
+        }
+      }
 
       const newMatRes = await tx.query('SELECT * FROM raw_materials WHERE id = $1', [Number(raw_material_id)]);
       if (newMatRes.rows.length === 0) {
@@ -642,12 +732,17 @@ router.patch('/:id', async (req, res) => {
       const landedPerBase = Number((totalLanded / baseQty).toFixed(4));
 
       const resolvedPayType = payment_type === 'credit' ? 'credit' : 'cash';
-      let resolvedPaid = totalLanded;
-      let resolvedPayStatus = 'paid';
-      if (resolvedPayType === 'credit') {
-        const rawPaid = amount_paid !== undefined && amount_paid !== null ? Number(amount_paid) : Number(old.amount_paid || 0);
-        resolvedPaid = Number(Math.min(totalLanded, Math.max(0, rawPaid)).toFixed(2));
-        resolvedPayStatus = resolvedPaid >= totalLanded ? 'paid' : resolvedPaid > 0 ? 'partial' : 'unpaid';
+      let resolvedPaid = old.amount_paid;
+      let resolvedPayStatus = old.payment_status;
+      if (!nextSupplierId) {
+        if (resolvedPayType === 'cash') {
+          resolvedPaid = totalLanded;
+          resolvedPayStatus = 'paid';
+        } else {
+          const rawPaid = amount_paid !== undefined && amount_paid !== null ? Number(amount_paid) : Number(old.amount_paid || 0);
+          resolvedPaid = Number(Math.min(totalLanded, Math.max(0, rawPaid)).toFixed(2));
+          resolvedPayStatus = resolvedPaid >= totalLanded ? 'paid' : resolvedPaid > 0 ? 'partial' : 'unpaid';
+        }
       }
 
       if (Number(old.raw_material_id) === Number(raw_material_id)) {
@@ -690,7 +785,7 @@ router.patch('/:id', async (req, res) => {
         ]);
       }
 
-      const uRes = await tx.query(
+      await tx.query(
         `UPDATE purchases
          SET purchase_date = COALESCE($1::date, purchase_date),
              supplier_id = $2,
@@ -709,10 +804,10 @@ router.patch('/:id', async (req, res) => {
              due_date = $15::date,
              payment_status = $16,
              notes = $17
-         WHERE id = $18 RETURNING *`,
+         WHERE id = $18`,
         [
           purchase_date || null,
-          supplier_id ? Number(supplier_id) : null,
+          nextSupplierId,
           Number(raw_material_id),
           qty,
           factor,
@@ -748,7 +843,8 @@ router.patch('/:id', async (req, res) => {
         );
       }
 
-      return uRes.rows[0];
+      const balRes = await tx.query('SELECT * FROM v_purchase_balances WHERE id = $1', [id]);
+      return balRes.rows[0];
     });
 
     res.json({ purchase: updated });

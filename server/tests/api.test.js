@@ -192,7 +192,9 @@ test('Dashboard summary returns complete P&L and marketing metrics', async () =>
   assert.ok(data.inventory.total_oil_litres > 0);
 });
 
-test('Suppliers & Credit (آجل): Credit purchase tracks balance due and settlement clears it', async () => {
+test('Suppliers & Credit (آجل): Immutable ledger transactions, reversals, and running-balance statement', async () => {
+  const { query } = await import('../db.js');
+
   // 1. Create a credit supplier
   const sRes = await fetch(`${baseUrl}/api/purchases/suppliers`, {
     method: 'POST',
@@ -209,7 +211,7 @@ test('Suppliers & Credit (آجل): Credit purchase tracks balance due and settle
   const { supplier } = await sRes.json();
   assert.equal(supplier.default_payment_type, 'credit');
 
-  // 2. Record a Credit (آجل) purchase with partial down payment (total = 10,000, paid = 3,000, due = 7,000)
+  // 2. Record a Credit (آجل) purchase with partial down payment (total = 10,000, down_payment = 3,000, due = 7,000)
   const matRes = await fetch(`${baseUrl}/api/purchases/materials`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -226,6 +228,7 @@ test('Suppliers & Credit (آجل): Credit purchase tracks balance due and settle
       unit_price: 5000,
       hidden_cost: 0,
       payment_type: 'credit',
+      payment_method: 'instapay',
       amount_paid: 3000,
       due_date: '2026-12-20',
     }),
@@ -234,7 +237,12 @@ test('Suppliers & Credit (آجل): Credit purchase tracks balance due and settle
   const { purchase } = await pRes.json();
   assert.equal(purchase.payment_type, 'credit');
   assert.equal(Number(purchase.amount_paid), 3000);
+  assert.equal(Number(purchase.remaining_due), 7000);
   assert.equal(purchase.payment_status, 'partial');
+
+  // Verify raw purchases row itself was NOT stored with amount_paid=3000 (ledger is single source of truth)
+  const rawPoBefore = (await query('SELECT amount_paid, payment_status FROM purchases WHERE id = $1', [purchase.id])).rows[0];
+  assert.equal(Number(rawPoBefore.amount_paid), 0);
 
   // 3. Check supplier balance_due == 7,000
   const listRes = await fetch(`${baseUrl}/api/purchases/suppliers`, {
@@ -242,8 +250,9 @@ test('Suppliers & Credit (آجل): Credit purchase tracks balance due and settle
   });
   const supAfterPo = (await listRes.json()).suppliers.find((s) => s.id === supplier.id);
   assert.equal(Number(supAfterPo.balance_due), 7000);
+  assert.equal(Number(supAfterPo.total_paid), 3000);
 
-  // 4. Record settlement payment of 7,000 EGP
+  // 4. Record settlement payment of 7,000 EGP (pure INSERT transaction, ZERO UPDATE on purchases)
   const payRes = await fetch(`${baseUrl}/api/purchases/supplier-payments`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -256,26 +265,95 @@ test('Suppliers & Credit (آجل): Credit purchase tracks balance due and settle
   });
   assert.equal(payRes.status, 201);
   const { payment } = await payRes.json();
+  assert.equal(payment.transaction_type, 'payment');
+  assert.equal(payment.is_reversed, false);
 
-  // 5. Verify supplier balance_due is now 0
+  // Confirm purchases row was NOT mutated by recording the payment!
+  const rawPoAfterPay = (await query('SELECT amount_paid, payment_status FROM purchases WHERE id = $1', [purchase.id])).rows[0];
+  assert.equal(Number(rawPoAfterPay.amount_paid), 0);
+  assert.equal(rawPoAfterPay.payment_status, 'unpaid');
+
+  // 5. Verify dynamic supplier balance_due is 0 AND dynamic purchase status is 'paid'
   const listRes2 = await fetch(`${baseUrl}/api/purchases/suppliers`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   const supAfterPay = (await listRes2.json()).suppliers.find((s) => s.id === supplier.id);
   assert.equal(Number(supAfterPay.balance_due), 0);
+  assert.equal(Number(supAfterPay.total_paid), 10000);
 
-  // 6. Cancel the settlement payment and verify balance_due restores to 7,000
-  const cancelPayRes = await fetch(`${baseUrl}/api/purchases/supplier-payments/${payment.id}`, {
-    method: 'DELETE',
+  const poListAfterPay = (await (await fetch(`${baseUrl}/api/purchases`, { headers: { Authorization: `Bearer ${token}` } })).json()).purchases;
+  const dynPoAfterPay = poListAfterPay.find((p) => p.id === purchase.id);
+  assert.equal(Number(dynPoAfterPay.amount_paid), 10000);
+  assert.equal(Number(dynPoAfterPay.remaining_due), 0);
+  assert.equal(dynPoAfterPay.payment_status, 'paid');
+
+  // 6. Reverse the settlement payment (appends a 'reversal' row without deleting or editing the original)
+  const revRes = await fetch(`${baseUrl}/api/purchases/supplier-payments/${payment.id}/reverse`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ notes: 'Entered wrong bank account' }),
+  });
+  assert.equal(revRes.status, 200);
+  const revData = await revRes.json();
+  assert.equal(revData.ok, true);
+  assert.equal(revData.reversal.transaction_type, 'reversal');
+  assert.equal(revData.reversal.reversed_payment_id, payment.id);
+  assert.equal(Number(revData.reversal.signed_amount), -7000);
+
+  // 7. Verify double-reversal is rejected (409) and reversing a reversal is rejected (400)
+  const doubleRevRes = await fetch(`${baseUrl}/api/purchases/supplier-payments/${payment.id}/reverse`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({}),
+  });
+  assert.equal(doubleRevRes.status, 409);
+
+  const revOfRevRes = await fetch(`${baseUrl}/api/purchases/supplier-payments/${revData.reversal.id}/reverse`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({}),
+  });
+  assert.equal(revOfRevRes.status, 400);
+
+  // 8. Verify direct SQL UPDATE and DELETE on supplier_payments are blocked by immutability trigger
+  await assert.rejects(
+    () => query('UPDATE supplier_payments SET amount = 1 WHERE id = $1', [payment.id]),
+    /immutable append-only ledger/i
+  );
+  await assert.rejects(
+    () => query('DELETE FROM supplier_payments WHERE id = $1', [payment.id]),
+    /immutable append-only ledger/i
+  );
+
+  // 9. Verify original payment still exists in ledger and is marked is_reversed = true
+  const ledgerRes = await fetch(`${baseUrl}/api/purchases/supplier-payments`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  assert.equal(cancelPayRes.status, 200);
+  const ledgerRows = (await ledgerRes.json()).payments.filter((r) => r.supplier_id === supplier.id);
+  assert.equal(ledgerRows.length, 3); // down_payment + payment + reversal
+  const origRow = ledgerRows.find((r) => r.id === payment.id);
+  assert.equal(origRow.is_reversed, true);
+  assert.equal(origRow.reversal_id, revData.reversal.id);
 
+  // 10. Verify balance_due restored to 7,000 and Supplier Statement running balance is exact
   const listRes3 = await fetch(`${baseUrl}/api/purchases/suppliers`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   const supAfterCancel = (await listRes3.json()).suppliers.find((s) => s.id === supplier.id);
   assert.equal(Number(supAfterCancel.balance_due), 7000);
+
+  const stmtRes = await fetch(`${baseUrl}/api/purchases/suppliers/${supplier.id}/statement`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(stmtRes.status, 200);
+  const stmt = await stmtRes.json();
+  assert.equal(stmt.entries.length, 4); // purchase, down_payment, payment, reversal
+  assert.equal(stmt.entries.map((e) => e.entry_type).join(','), 'purchase,down_payment,payment,reversal');
+  assert.deepEqual(
+    stmt.entries.map((e) => Number(e.running_balance)),
+    [10000, 7000, 0, 7000]
+  );
+  assert.equal(Number(stmt.supplier.balance_due), 7000);
 });
 
 test('Edit operations: Raw Material, Purchase, Finished Product, and Bottling Batch update atomically', async () => {
